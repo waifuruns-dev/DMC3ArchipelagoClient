@@ -377,12 +377,15 @@ pub(crate) fn apply_style_levels(style: Style) {
 
         CharacterData::with_read(|c| {
             if style.get_internal_order_index() == c.style as usize {
+                // CharacterData::ptr() is the address of the pointer to the active character,
+                // not the character itself; the game's XP function needs the character
+                let character = c as *const CharacterData as usize;
                 match c.style_level {
                     0 => {
-                        ORIGINAL_GIVE_STYLE_XP.get().unwrap()(CharacterData::ptr(), LEVEL_1_XP);
+                        ORIGINAL_GIVE_STYLE_XP.get().unwrap()(character, LEVEL_1_XP);
                     }
                     1 => {
-                        ORIGINAL_GIVE_STYLE_XP.get().unwrap()(CharacterData::ptr(), LEVEL_2_XP);
+                        ORIGINAL_GIVE_STYLE_XP.get().unwrap()(character, LEVEL_2_XP);
                     }
                     2 => {
                         log::debug!("Style {style} is max level");

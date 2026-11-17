@@ -294,11 +294,20 @@ pub fn run_scouts_for_room(client: &mut Client<ModModeData>, hint: CreateAsHint)
 
 pub fn get_locations_by_room(client: &Client<ModModeData>, room: i32) -> Vec<Location> {
     let current_game = client.this_game();
-    generated_locations::ITEM_MISSION_MAP
+    let mut locations: Vec<Location> = generated_locations::ITEM_MISSION_MAP
         .iter()
         .filter(|(_k, v)| v.room_number == room && v.mission != 0)
         .filter_map(|(k, _v)| current_game.location_by_name(*k))
-        .collect()
+        .collect();
+    // Also scout locations whose item can spawn again in this room (e.g. Artemis in M16),
+    // otherwise picking it up there finds no scouted item and nothing is sent
+    locations.extend(
+        crate::constants::ALTERNATE_SPAWNS
+            .iter()
+            .filter(|(spawn_room, _, _)| *spawn_room == room)
+            .filter_map(|(_, _, key)| current_game.location_by_name(*key)),
+    );
+    locations
 }
 
 pub fn get_secret_missions(client: &Client<ModModeData>) -> Vec<Location> {

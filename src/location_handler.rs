@@ -60,6 +60,17 @@ pub fn get_location_name_by_data(location_data: &Location) -> Result<&'static st
         return Ok(location.0);
     }
 
+    // Items that can also spawn in a room other than their location's room
+    if location_data.location_type == LocationType::Standard
+        && let Some((_, _, key)) = constants::ALTERNATE_SPAWNS
+            .iter()
+            .find(|(room, item_id, _)| {
+                *room == location_data.room && *item_id == location_data.item_id
+            })
+    {
+        return Ok(key);
+    }
+
     let filtered_locs =
         generated_locations::ITEM_MISSION_MAP
             .iter()

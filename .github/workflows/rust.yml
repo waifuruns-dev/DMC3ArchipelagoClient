@@ -3,23 +3,38 @@ name: Build
 on:
   push:
     branches: [ "master" ]
+    tags: [ "*" ]
   pull_request:
     branches: [ "master" ]
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
+  # AshIndigo's workspace (APRandomizers) at the commit this fork was built against
+  WORKSPACE_REF: 88a470fbd1ad2fda1fbb406ac315a2812ddc71a3
 
 jobs:
   build:
     # Mod is for Windows
     runs-on: windows-latest
-    # Grab meta repo.
     steps:
+    # AshIndigo's workspace, which holds the shared crates (archipelago_rs, randomizer_utilities)
     - uses: actions/checkout@v6
       with:
         repository: AshIndigo/APRandomizers
-        submodules: 'true'
-    # Obtain the cache if it exists
+        ref: ${{ env.WORKSPACE_REF }}
+        submodules: 'false'
+    # This repository, in place of the workspace's DMC3 submodule
+    - uses: actions/checkout@v6
+      with:
+        path: DMC3ArchipelagoClient
+    - name: Prepare workspace
+      shell: bash
+      run: |
+        git submodule update --init archipelago_rs
+        # Only build what DMC3 needs (the other games' submodules aren't checked out)
+        sed -i 's/^members = .*/members = ["archipelago_rs", "DMC3ArchipelagoClient", "randomizer_utilities"]/' Cargo.toml
+        grep '^members' Cargo.toml
     - name: Cache
       uses: actions/cache@v5
       with:
@@ -27,46 +42,36 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          # Key is based off of main cargo.lock hash
           key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
-    # Build DMC3's release
     - name: Build DMC3 Client
       run: cargo build -p DMC3ArchipelagoClient --release
-    # Get the version for use in zip name
     - name: Get Cargo.toml version
       id: cargo_version
-      run: |
-        $version = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json | %{$_.packages[1].version}
-        echo "CARGO_VERSION=$version" >> $env:GITHUB_ENV
-    # Compile needed files
+      shell: bash
+      run: echo "CARGO_VERSION=$(grep -m1 '^version' DMC3ArchipelagoClient/Cargo.toml | cut -d'"' -f2)" >> "$GITHUB_ENV"
     - name: Package files
-      run: |
-        Copy-Item -Path target/release/dmc3_randomizer.dll -Destination dmc3_randomizer.dll
-    # Zip files
+      run: Copy-Item -Path target/release/dmc3_randomizer.dll -Destination dmc3_randomizer.dll
     - name: Upload a Build Artifact
       uses: actions/upload-artifact@v6
       with:
         name: "DMC3-Archipelago-${{ env.CARGO_VERSION }}"
         path: |
             dmc3_randomizer.dll
-  # Release section
+  # Release section: push a tag to publish the DLL as a GitHub release
   release:
     needs: build
     if: startsWith(github.ref, 'refs/tags/')
-    runs-on: windows-latest
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
-      - uses: actions/checkout@v6
-
       - name: Download build artifact
         uses: actions/download-artifact@v4
         with:
-          name: "DMC3-Archipelago-${{ env.CARGO_VERSION }}"
+          pattern: "DMC3-Archipelago-*"
           path: ./
-
+          merge-multiple: true
       - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v2.5.0
         with:
-          files: "DMC3-Archipelago-${{ env.CARGO_VERSION }}.zip"
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
+          files: dmc3_randomizer.dll

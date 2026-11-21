@@ -108,6 +108,8 @@ fn main_loop_hook() {
             func();
         }
     }
+    // Keep a received Death Link applied for a few ticks (Devil Trigger can heal through one write)
+    game_manager::tick_pending_kill();
 
     if !config::CONFIG.connections.disable_auto_connect
         && let Ok(mut core) = AP_CORE

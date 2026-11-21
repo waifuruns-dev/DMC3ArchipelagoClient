@@ -12,6 +12,7 @@ use crate::utilities::{DMC3_ADDRESS, read_data_from_address};
 use archipelago_rs::Item;
 use randomizer_utilities::replace_single_byte;
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{LazyLock, RwLock};
 
 #[derive(Debug, Default)]
@@ -274,15 +275,41 @@ pub(crate) fn hurt_dante() {
         // Insta kill
         Difficulty::HeavenOrHell => 1.0,
     };
-    let _ = CharacterData::with_mut(|c| {
+    let killed = CharacterData::with_mut(|c| {
         c.hp = f32::max(c.hp - (c.max_hp * damage_fraction), 0.0);
+        c.hp <= 0.0
+    })
+    .unwrap_or(false);
+    // A Hurt Link that empties the health bar should kill reliably too (e.g. while in Devil Trigger)
+    if killed {
+        kill_dante();
+    }
+}
+
+/// How many main loop ticks a received Death Link keeps Dante at 0 HP. Devil Trigger regenerates
+/// health, so a single write of 0 HP could be healed back before the game noticed it.
+const KILL_TICKS: u32 = 30;
+static KILL_TICKS_LEFT: AtomicU32 = AtomicU32::new(0);
+
+pub(crate) fn kill_dante() {
+    KILL_TICKS_LEFT.store(KILL_TICKS, Ordering::SeqCst);
+    apply_kill();
+}
+
+fn apply_kill() {
+    let _ = CharacterData::with_mut(|c| {
+        // Empty the DT gauge too, so Devil Trigger ends and stops regenerating health
+        c.magic = 0.0;
+        c.hp = 0.0;
     });
 }
 
-pub(crate) fn kill_dante() {
-    let _ = CharacterData::with_mut(|c| {
-        c.hp = 0.0;
-    });
+/// Called from the main loop: keeps a received Death Link applied for a few ticks
+pub(crate) fn tick_pending_kill() {
+    if KILL_TICKS_LEFT.load(Ordering::SeqCst) > 0 {
+        KILL_TICKS_LEFT.fetch_sub(1, Ordering::SeqCst);
+        apply_kill();
+    }
 }
 
 pub fn set_session_weapons() {

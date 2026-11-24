@@ -876,11 +876,82 @@ pub(crate) fn find_skill_copies(when: &str, shop: usize) {
         log::debug!("  {:#X} [{}]: {:X?}", a, describe_addr(a, shop), v);
         values.push(v);
     }
+    find_pointers_to(&found);
     if let Ok(mut addrs) = SKILL_COPY_ADDRS.write() {
         *addrs = found;
     }
     if let Ok(mut vals) = SKILL_COPY_VALUES.write() {
         *vals = values;
+    }
+}
+
+/// Test build: looks through the game's own data (the exe's memory) for pointers to, or up to
+/// 0x8000 bytes before, each skill list found, so it can be found again after a relaunch.
+/// Read-only.
+fn find_pointers_to(found: &[usize]) {
+    use windows::Win32::System::Memory::{
+        MEM_COMMIT, MEMORY_BASIC_INFORMATION, PAGE_GUARD, PAGE_NOACCESS, VirtualQuery,
+    };
+    const RANGE: usize = 0x8000;
+    let module = *crate::DMC3_ADDRESS;
+    let targets: Vec<usize> = found
+        .iter()
+        .copied()
+        .filter(|&a| !(a >= module && a < module + 0x4000000))
+        .collect();
+    if targets.is_empty() {
+        return;
+    }
+    let started = std::time::Instant::now();
+    let mut hits: Vec<String> = vec![];
+    let mut buf = vec![0u8; 0x10_0000];
+    let mut addr = module;
+    while addr < module + 0x4000000 && hits.len() < 200 {
+        let mut info = MEMORY_BASIC_INFORMATION::default();
+        let size = unsafe {
+            VirtualQuery(Some(addr as *const _), &mut info, size_of::<MEMORY_BASIC_INFORMATION>())
+        };
+        if size == 0 || info.AllocationBase as usize != module {
+            break;
+        }
+        let base = info.BaseAddress as usize;
+        let region_end = base + info.RegionSize;
+        if info.State == MEM_COMMIT
+            && info.Protect.0 != 0
+            && info.Protect.0 & (PAGE_GUARD.0 | PAGE_NOACCESS.0) == 0
+        {
+            let mut p = base;
+            while p < region_end {
+                let len = (region_end - p).min(buf.len());
+                if len >= 8 && safe_read(p, &mut buf[..len]) {
+                    let mut i = 0;
+                    while i + 8 <= len {
+                        let v = u64::from_le_bytes(buf[i..i + 8].try_into().unwrap()) as usize;
+                        for &t in &targets {
+                            if v <= t && t - v < RANGE {
+                                hits.push(format!(
+                                    "game+{:#X} = {:#X} (list at +{:#X})",
+                                    p + i - module,
+                                    v,
+                                    t - v
+                                ));
+                            }
+                        }
+                        i += 8;
+                    }
+                }
+                p += len;
+            }
+        }
+        addr = region_end;
+    }
+    log::debug!(
+        "Pointers to skill lists in game data ({} found in {:?}):",
+        hits.len(),
+        started.elapsed()
+    );
+    for h in hits {
+        log::debug!("  {}", h);
     }
 }
 

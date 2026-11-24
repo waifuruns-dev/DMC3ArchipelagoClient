@@ -104,19 +104,28 @@ pub fn skill_shop_constructor(custom_skill: usize) {
         .unwrap()
         .as_ref()
         .is_some_and(|m| m.randomize_skills && m.shop_skill_checks);
+    log::info!("Skill shop constructor ({:#X}), skill checks: {}", custom_skill, skill_checks);
     if skill_checks {
         // Show which purchase checks are done before the shop builds its list
-        if let Ok(core) = AP_CORE.get().unwrap().lock()
-            && let Some(client) = core.connection.client()
-        {
-            let checked: Vec<String> = client
+        let core = AP_CORE
+            .get()
+            .unwrap()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let checked: Vec<String> = match core.connection.client() {
+            Some(client) => client
                 .checked_locations()
                 .map(|loc| loc.name().to_string())
-                .collect();
-            skill_manager::open_skill_shop(skill_manager::purchase_check_expertise(
-                checked.iter().map(|s| s.as_str()),
-            ));
-        }
+                .collect(),
+            None => {
+                log::warn!("Skill shop: no client connection, showing no purchases done");
+                vec![]
+            }
+        };
+        drop(core);
+        skill_manager::open_skill_shop(skill_manager::purchase_check_expertise(
+            checked.iter().map(|s| s.as_str()),
+        ));
     }
     if let Some(orig) = ORIGINAL_SKILL_SHOP_CONSTRUCTOR.get() {
         unsafe {
@@ -163,6 +172,7 @@ pub static ORIGINAL_SKILL_SHOP_DECONSTRUCTOR: OnceLock<unsafe extern "C" fn(cust
     OnceLock::new();
 
 pub fn skill_shop_deconstructor(custom_skill: usize) {
+    log::info!("Skill shop deconstructor ({:#X})", custom_skill);
     if skill_manager::IN_SKILL_SHOP.load(Ordering::SeqCst) {
         send_bought_skills();
     }
@@ -184,6 +194,15 @@ pub static ORIGINAL_PURCHASE_SKILL_SHOP: OnceLock<unsafe extern "C" fn(custom_sk
 pub fn skill_shop_purchase(custom_skill: usize) {
     if let Some(mapping) = MAPPING.read().unwrap().as_ref() {
         let mode = read_data_from_address::<u8>(custom_skill + 0x09);
+        // Log mode changes only (this runs every frame while the shop is open)
+        static LAST_MODE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0xFF);
+        if LAST_MODE.swap(mode, Ordering::SeqCst) != mode {
+            log::debug!(
+                "Skill shop mode {:#X}, purchase checks open: {}",
+                mode,
+                skill_manager::IN_SKILL_SHOP.load(Ordering::SeqCst)
+            );
+        }
         if skill_manager::IN_SKILL_SHOP.load(Ordering::SeqCst) {
             // Purchase checks: let the game sell the skill, then send its check
             if let Some(orig) = ORIGINAL_PURCHASE_SKILL_SHOP.get() {

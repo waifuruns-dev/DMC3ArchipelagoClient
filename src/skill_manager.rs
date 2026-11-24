@@ -599,6 +599,9 @@ pub(crate) fn open_skill_shop(flags: [u32; 8]) {
     IN_SKILL_SHOP.store(true, Ordering::SeqCst);
     let _ = SessionData::with_mut(|s| s.expertise = flags);
     let _ = CharacterData::with_mut(|c| c.expertise = flags);
+    // The shop shows bought/unbought from the mission's active copy (the game writes purchases
+    // there too, so this spot is confirmed)
+    let _ = crate::data::game_structs::ActiveMissionActorData::with_mut(|a| a.expertise = flags);
     if let Ok(mut snap) = SHOP_SNAPSHOT.write() {
         *snap = Some(flags);
     }
@@ -708,6 +711,15 @@ pub(crate) fn poll_bought_skills() -> Vec<&'static str> {
     };
     if std::time::Instant::now() > until {
         *pending = None;
+        // Done watching: put the mission copy back to the skills actually received
+        if !IN_SKILL_SHOP.load(Ordering::SeqCst)
+            && let Some(received) = EXPECTED_EXPERTISE.read().ok().and_then(|e| *e)
+        {
+            let _ = crate::data::game_structs::ActiveMissionActorData::with_mut(|a| {
+                a.expertise = received
+            });
+            log::debug!("Skill shop: mission skill copy restored to received skills");
+        }
         return vec![];
     }
     let Some(now) = mission_expertise() else {

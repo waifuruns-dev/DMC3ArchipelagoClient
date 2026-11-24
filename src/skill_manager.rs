@@ -624,6 +624,13 @@ pub(crate) fn take_bought_skills() -> Vec<&'static str> {
             current[i] |= c[i];
         }
     }
+    let copy_addr = SHOP_COPY_ADDR.load(Ordering::SeqCst);
+    if copy_addr != 0 {
+        let copy = unsafe { std::ptr::read_unaligned(copy_addr as *const [u32; 8]) };
+        for i in 0..8 {
+            current[i] |= copy[i];
+        }
+    }
     let bought = newly_bought(&old, &current);
     if !bought.is_empty() {
         log::debug!("Skill shop: bought {:?}", bought);
@@ -634,6 +641,7 @@ pub(crate) fn take_bought_skills() -> Vec<&'static str> {
 
 /// Leaves the shop: stop showing purchase checks and put received skills back
 pub(crate) fn close_skill_shop(data: &ArchipelagoData) {
+    SHOP_COPY_ADDR.store(0, Ordering::SeqCst);
     if let Ok(mut snap) = SHOP_SNAPSHOT.write() {
         *snap = None;
     }
@@ -646,5 +654,62 @@ pub(crate) fn close_skill_shop(data: &ArchipelagoData) {
 pub(crate) fn log_expertise(when: &str) {
     let session = SessionData::with_read(|s| s.expertise).ok();
     let live = CharacterData::with_read(|c| c.expertise).ok();
-    log::debug!("Skill flags {}: session {:X?}, live {:X?}", when, session, live);
+    let copy_addr = SHOP_COPY_ADDR.load(Ordering::SeqCst);
+    let copy = (copy_addr != 0)
+        .then(|| unsafe { std::ptr::read_unaligned(copy_addr as *const [u32; 8]) });
+    log::debug!(
+        "Skill flags {}: session {:X?}, live {:X?}, shop copy {:X?}",
+        when, session, live, copy
+    );
+}
+
+/// Where the open shop keeps its own copy of the skill flags (0 if not found)
+pub(crate) static SHOP_COPY_ADDR: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// Looks through the shop's memory (from `start`, within readable memory) for a copy of `flags`
+pub(crate) fn find_shop_copy(start: usize, flags: [u32; 8]) {
+    use windows::Win32::System::Memory::{
+        MEM_COMMIT, MEMORY_BASIC_INFORMATION, PAGE_GUARD, PAGE_NOACCESS, VirtualQuery,
+    };
+    const MAX_SCAN: usize = 0x20000;
+    let mut found: Vec<usize> = vec![];
+    let mut addr = start;
+    let end_limit = start + MAX_SCAN;
+    while addr < end_limit {
+        let mut info = MEMORY_BASIC_INFORMATION::default();
+        let size = unsafe {
+            VirtualQuery(
+                Some(addr as *const _),
+                &mut info,
+                size_of::<MEMORY_BASIC_INFORMATION>(),
+            )
+        };
+        if size == 0 {
+            break;
+        }
+        let region_end = info.BaseAddress as usize + info.RegionSize;
+        let readable = info.State == MEM_COMMIT
+            && (info.Protect.0 & (PAGE_NOACCESS.0 | PAGE_GUARD.0)) == 0
+            && info.Protect.0 != 0;
+        if !readable {
+            break;
+        }
+        let stop = region_end.min(end_limit);
+        let mut p = addr;
+        while p + 32 <= stop {
+            let words = unsafe { std::ptr::read_unaligned(p as *const [u32; 8]) };
+            if words == flags {
+                found.push(p);
+            }
+            p += 4;
+        }
+        addr = region_end;
+    }
+    log::debug!(
+        "Shop skill copy search from {:#X}: found at offsets {:X?}",
+        start,
+        found.iter().map(|a| a - start).collect::<Vec<_>>()
+    );
+    SHOP_COPY_ADDR.store(found.first().copied().unwrap_or(0), Ordering::SeqCst);
 }

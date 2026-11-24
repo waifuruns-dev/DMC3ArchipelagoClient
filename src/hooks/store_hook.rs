@@ -4,6 +4,7 @@ use crate::hooks::check_handler;
 use crate::hooks::check_handler::{Location, LocationType};
 use crate::mapping::MAPPING;
 use crate::ui::overlay::{CANT_PURCHASE, SHOW_GUN_LEVELS};
+use crate::data::game_structs::{GameData, SessionData};
 use crate::game_manager::ARCHIPELAGO_DATA;
 use crate::{AP_CORE, create_hook, skill_manager, tracker};
 use minhook::{MH_STATUS, MinHook};
@@ -132,6 +133,9 @@ pub fn skill_shop_constructor(custom_skill: usize) {
             orig(custom_skill);
         }
     }
+    if skill_checks && let Ok(flags) = SessionData::with_read(|s| s.expertise) {
+        skill_manager::find_shop_copy(custom_skill, flags);
+    }
     if let Some(mapping) = MAPPING.read().unwrap().as_ref()
         && mapping.randomize_skills
         && !mapping.shop_skill_checks
@@ -209,6 +213,12 @@ pub fn skill_shop_purchase(custom_skill: usize) {
                 skill_manager::IN_SKILL_SHOP.load(Ordering::SeqCst)
             );
             if skill_manager::IN_SKILL_SHOP.load(Ordering::SeqCst) {
+                // The shop may build its copy after the constructor; look again until found
+                if skill_manager::SHOP_COPY_ADDR.load(Ordering::SeqCst) == 0
+                    && let Ok(flags) = SessionData::with_read(|s| s.expertise)
+                {
+                    skill_manager::find_shop_copy(custom_skill, flags);
+                }
                 skill_manager::log_expertise("shop mode change");
                 // Test build: dump the shop object's first 0x200 bytes as u32s, to find where it
                 // keeps bought skills if not in the session

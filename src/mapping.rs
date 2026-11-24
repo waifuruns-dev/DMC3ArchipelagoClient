@@ -299,6 +299,15 @@ pub fn get_locations_by_room(client: &Client<ModModeData>, room: i32) -> Vec<Loc
         .filter(|(_k, v)| v.room_number == room && v.mission != 0)
         .filter_map(|(k, _v)| current_game.location_by_name(*k))
         .collect();
+    // Only ask the server about checks that are in this seed. Asking about one that isn't (e.g.
+    // SS Rank checks when they're off) makes the server error and drop the connection, and any
+    // check sent before the mod reconnects is lost.
+    let in_seed: std::collections::HashSet<i64> = client
+        .checked_locations()
+        .chain(client.unchecked_locations())
+        .map(|loc| loc.id())
+        .collect();
+    locations.retain(|loc| in_seed.contains(&loc.id()));
     // Also scout locations whose item can spawn again in this room (e.g. Artemis in M16),
     // otherwise picking it up there finds no scouted item and nothing is sent
     locations.extend(
@@ -307,6 +316,7 @@ pub fn get_locations_by_room(client: &Client<ModModeData>, room: i32) -> Vec<Loc
             .filter(|(spawn_room, _, _)| *spawn_room == room)
             .filter_map(|(_, _, key)| current_game.location_by_name(*key)),
     );
+    locations.retain(|loc| in_seed.contains(&loc.id()));
     locations
 }
 

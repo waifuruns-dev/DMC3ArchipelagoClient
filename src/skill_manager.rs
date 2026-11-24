@@ -162,7 +162,8 @@ static SKILLS_MAP: LazyLock<HashMap<&str, SkillData>> = LazyLock::new(|| {
             SkillData {
                 id: 0x4F,
                 index: 3,
-                flag: 0x2000000,
+                // Buying it in the shop sets 0x4000000 (0x2000000 is on by default, so it did nothing)
+                flag: 0x4000000,
             },
         ),
         (
@@ -599,9 +600,6 @@ pub(crate) fn open_skill_shop(flags: [u32; 8]) {
     IN_SKILL_SHOP.store(true, Ordering::SeqCst);
     let _ = SessionData::with_mut(|s| s.expertise = flags);
     let _ = CharacterData::with_mut(|c| c.expertise = flags);
-    // The shop shows bought/unbought from the mission's active copy (the game writes purchases
-    // there too, so this spot is confirmed)
-    let _ = crate::data::game_structs::ActiveMissionActorData::with_mut(|a| a.expertise = flags);
     if let Ok(mut snap) = SHOP_SNAPSHOT.write() {
         *snap = Some(flags);
     }
@@ -632,7 +630,11 @@ pub(crate) fn take_bought_skills() -> Vec<&'static str> {
             current[i] |= m[i];
         }
     }
-    let bought = newly_bought(&old, &current);
+    let mut bought = newly_bought(&old, &current);
+    if let Ok(mut reported) = REPORTED_PURCHASES.write() {
+        bought.retain(|name| !reported.contains(name));
+        reported.extend(bought.iter().copied());
+    }
     if !bought.is_empty() {
         log::debug!("Skill shop: bought {:?}", bought);
         *snap = Some(current);
@@ -690,6 +692,9 @@ pub(crate) fn watch_skill_flags() {
 
 /// After the shop closes the game writes bought skills into the mission copy about a second
 /// later. (flags at shop close, when to stop watching)
+/// Purchases already turned into checks this session
+static REPORTED_PURCHASES: LazyLock<RwLock<std::collections::HashSet<&'static str>>> =
+    LazyLock::new(|| RwLock::new(std::collections::HashSet::new()));
 static PENDING_PURCHASES: RwLock<Option<([u32; 8], std::time::Instant)>> = RwLock::new(None);
 const PURCHASE_WATCH: std::time::Duration = std::time::Duration::from_secs(6);
 
@@ -730,13 +735,21 @@ pub(crate) fn poll_bought_skills() -> Vec<&'static str> {
         .ok()
         .and_then(|e| *e)
         .unwrap_or(DEFAULT_SKILLS);
-    let bought: Vec<&'static str> = newly_bought(&prev, &now)
-        .into_iter()
-        .filter(|name| {
-            let d = SKILLS_MAP.get(name).unwrap();
-            received[d.index] & d.flag == 0
+    // The game writes "skills it had + skills bought this visit". Anything there that wasn't
+    // received as an item is a purchase; ones already sent are skipped.
+    let Ok(mut reported) = REPORTED_PURCHASES.write() else {
+        return vec![];
+    };
+    let bought: Vec<&'static str> = SKILLS_MAP
+        .iter()
+        .filter(|(name, d)| {
+            now[d.index] & d.flag != 0
+                && received[d.index] & d.flag == 0
+                && !reported.contains(*name)
         })
+        .map(|(name, _)| *name)
         .collect();
+    reported.extend(bought.iter().copied());
     if now != prev {
         *pending = Some((now, until));
     }
@@ -744,4 +757,148 @@ pub(crate) fn poll_bought_skills() -> Vec<&'static str> {
         log::debug!("Skill shop: bought {:?} (written after the shop closed)", bought);
     }
     bought
+}
+
+// ---------------------------------------------------------------------------------------------
+// Test build only: finds where the shop keeps the skill list it shows. Read-only: it searches
+// game memory for skill lists and logs where they are and when they change. Nothing here is
+// used to send checks or written back to the game.
+
+/// Skill lists found when the shop last opened
+static SKILL_COPY_ADDRS: RwLock<Vec<usize>> = RwLock::new(Vec::new());
+/// Last logged values of those lists
+static SKILL_COPY_VALUES: RwLock<Vec<Option<[u32; 8]>>> = RwLock::new(Vec::new());
+
+/// True if `addr..addr + len` is committed, readable memory
+fn readable(addr: usize, len: usize) -> bool {
+    use windows::Win32::System::Memory::{
+        MEM_COMMIT, MEMORY_BASIC_INFORMATION, PAGE_GUARD, PAGE_NOACCESS, VirtualQuery,
+    };
+    let mut info = MEMORY_BASIC_INFORMATION::default();
+    let size = unsafe {
+        VirtualQuery(Some(addr as *const _), &mut info, size_of::<MEMORY_BASIC_INFORMATION>())
+    };
+    size != 0
+        && info.State == MEM_COMMIT
+        && info.Protect.0 & (PAGE_GUARD.0 | PAGE_NOACCESS.0) == 0
+        && info.Protect.0 != 0
+        && addr + len <= info.BaseAddress as usize + info.RegionSize
+}
+
+fn read_copy(addr: usize) -> Option<[u32; 8]> {
+    if readable(addr, 32) {
+        Some(unsafe { std::ptr::read_unaligned(addr as *const [u32; 8]) })
+    } else {
+        None
+    }
+}
+
+/// Where an address sits, relative to the game structs we know
+fn describe_addr(addr: usize, shop: usize) -> String {
+    let module = *crate::DMC3_ADDRESS;
+    let mission = if crate::data::game_structs::MissionData::is_valid() {
+        randomizer_utilities::read_data_from_address::<usize>(
+            crate::data::game_structs::MissionData::ptr(),
+        )
+    } else {
+        0
+    };
+    let character = if CharacterData::is_valid() {
+        randomizer_utilities::read_data_from_address::<usize>(CharacterData::ptr())
+    } else {
+        0
+    };
+    let mut parts = vec![];
+    for (label, base, range) in [
+        ("module", module, 0x2000000usize),
+        ("mission", mission, 0x4000),
+        ("character", character, 0x10000),
+        ("shop", shop, 0x4000),
+    ] {
+        if base != 0 && addr >= base && addr < base + range {
+            parts.push(format!("{}+{:#X}", label, addr - base));
+        }
+    }
+    if parts.is_empty() {
+        "elsewhere".to_string()
+    } else {
+        parts.join(", ")
+    }
+}
+
+/// Searches writable game memory for skill lists (words 4 and 5 never change, so they mark one)
+pub(crate) fn find_skill_copies(when: &str, shop: usize) {
+    use windows::Win32::System::Memory::{
+        MEM_COMMIT, MEMORY_BASIC_INFORMATION, PAGE_EXECUTE_READWRITE, PAGE_EXECUTE_WRITECOPY,
+        PAGE_GUARD, PAGE_READWRITE, PAGE_WRITECOPY, VirtualQuery,
+    };
+    let writable = PAGE_READWRITE.0 | PAGE_WRITECOPY.0 | PAGE_EXECUTE_READWRITE.0 | PAGE_EXECUTE_WRITECOPY.0;
+    let started = std::time::Instant::now();
+    let mut found: Vec<usize> = vec![];
+    let mut addr: usize = 0x10000;
+    while addr < 0x7FFF_FFFF_0000 && found.len() < 64 {
+        let mut info = MEMORY_BASIC_INFORMATION::default();
+        let size = unsafe {
+            VirtualQuery(Some(addr as *const _), &mut info, size_of::<MEMORY_BASIC_INFORMATION>())
+        };
+        if size == 0 {
+            break;
+        }
+        let base = info.BaseAddress as usize;
+        let region_end = base + info.RegionSize;
+        if info.State == MEM_COMMIT
+            && info.Protect.0 & writable != 0
+            && info.Protect.0 & PAGE_GUARD.0 == 0
+            && info.RegionSize <= 0x1000_0000
+        {
+            let mut p = base;
+            while p + 32 <= region_end && found.len() < 64 {
+                let w4 = unsafe { std::ptr::read((p + 16) as *const u32) };
+                if w4 == DEFAULT_SKILLS[4]
+                    && unsafe { std::ptr::read((p + 20) as *const u32) } == DEFAULT_SKILLS[5]
+                {
+                    found.push(p);
+                }
+                p += 4;
+            }
+        }
+        addr = region_end.max(addr + 0x1000);
+    }
+    log::debug!(
+        "Skill list search ({}), {} found in {:?}:",
+        when,
+        found.len(),
+        started.elapsed()
+    );
+    let mut values = vec![];
+    for &a in &found {
+        let v = read_copy(a);
+        log::debug!("  {:#X} [{}]: {:X?}", a, describe_addr(a, shop), v);
+        values.push(v);
+    }
+    if let Ok(mut addrs) = SKILL_COPY_ADDRS.write() {
+        *addrs = found;
+    }
+    if let Ok(mut vals) = SKILL_COPY_VALUES.write() {
+        *vals = values;
+    }
+}
+
+/// Called every frame: logs any found skill list whose value changed
+pub(crate) fn watch_skill_copies() {
+    let Ok(addrs) = SKILL_COPY_ADDRS.try_read() else {
+        return;
+    };
+    let Ok(mut vals) = SKILL_COPY_VALUES.try_write() else {
+        return;
+    };
+    for (i, &a) in addrs.iter().enumerate() {
+        let now = read_copy(a);
+        if vals.get(i) != Some(&now) {
+            log::debug!("Skill list {:#X} changed: {:X?}", a, now);
+            if let Some(v) = vals.get_mut(i) {
+                *v = now;
+            }
+        }
+    }
 }

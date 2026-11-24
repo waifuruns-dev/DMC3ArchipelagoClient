@@ -123,6 +123,7 @@ pub fn skill_shop_constructor(custom_skill: usize) {
             }
         };
         drop(core);
+        skill_manager::find_skill_copies("shop opening, before our write", custom_skill);
         skill_manager::open_skill_shop(skill_manager::purchase_check_expertise(
             checked.iter().map(|s| s.as_str()),
         ));
@@ -131,6 +132,9 @@ pub fn skill_shop_constructor(custom_skill: usize) {
         unsafe {
             orig(custom_skill);
         }
+    }
+    if skill_checks {
+        skill_manager::find_skill_copies("shop opened", custom_skill); // Test build logging
     }
     if let Some(mapping) = MAPPING.read().unwrap().as_ref()
         && mapping.randomize_skills
@@ -160,8 +164,14 @@ fn send_skill_checks(bought: Vec<&'static str>) {
     if let Ok(mut core) = AP_CORE.get().unwrap().lock()
         && let Some(client) = core.connection.client_mut()
     {
+        let already: std::collections::HashSet<String> =
+            client.checked_locations().map(|loc| loc.name().to_string()).collect();
         for skill in bought {
             let name = format!("Purchase {}", skill);
+            if already.contains(&name) {
+                log::debug!("Skill purchase check already done: {}", name);
+                continue;
+            }
             match client.this_game().location_by_name(name.as_str()) {
                 Some(location) => {
                     let id = location.id();

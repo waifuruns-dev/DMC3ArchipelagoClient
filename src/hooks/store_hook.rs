@@ -4,7 +4,8 @@ use crate::hooks::check_handler;
 use crate::hooks::check_handler::{Location, LocationType};
 use crate::mapping::MAPPING;
 use crate::ui::overlay::{CANT_PURCHASE, SHOW_GUN_LEVELS};
-use crate::{AP_CORE, create_hook, tracker};
+use crate::game_manager::ARCHIPELAGO_DATA;
+use crate::{AP_CORE, create_hook, skill_manager, tracker};
 use minhook::{MH_STATUS, MinHook};
 use randomizer_utilities::read_data_from_address;
 use std::ptr::write;
@@ -98,6 +99,25 @@ pub static ORIGINAL_SKILL_SHOP_CONSTRUCTOR: OnceLock<unsafe extern "C" fn(custom
     OnceLock::new();
 
 pub fn skill_shop_constructor(custom_skill: usize) {
+    let skill_checks = MAPPING
+        .read()
+        .unwrap()
+        .as_ref()
+        .is_some_and(|m| m.randomize_skills && m.shop_skill_checks);
+    if skill_checks {
+        // Show which purchase checks are done before the shop builds its list
+        if let Ok(core) = AP_CORE.get().unwrap().lock()
+            && let Some(client) = core.connection.client()
+        {
+            let checked: Vec<String> = client
+                .checked_locations()
+                .map(|loc| loc.name().to_string())
+                .collect();
+            skill_manager::open_skill_shop(skill_manager::purchase_check_expertise(
+                checked.iter().map(|s| s.as_str()),
+            ));
+        }
+    }
     if let Some(orig) = ORIGINAL_SKILL_SHOP_CONSTRUCTOR.get() {
         unsafe {
             orig(custom_skill);
@@ -111,17 +131,50 @@ pub fn skill_shop_constructor(custom_skill: usize) {
     }
 }
 
+/// Sends a "Purchase <skill>" check for each skill bought in the shop
+fn send_bought_skills() {
+    let bought = skill_manager::take_bought_skills();
+    if bought.is_empty() {
+        return;
+    }
+    if let Ok(mut core) = AP_CORE.get().unwrap().lock()
+        && let Some(client) = core.connection.client_mut()
+    {
+        for skill in bought {
+            let name = format!("Purchase {}", skill);
+            match client.this_game().location_by_name(name.as_str()) {
+                Some(location) => {
+                    let id = location.id();
+                    if let Err(e) = client.mark_checked(vec![location]) {
+                        log::error!("Failed to send skill purchase check {}: {}", name, e);
+                        randomizer_utilities::item_sync::add_offline_check(id);
+                    } else {
+                        log::info!("Sent skill purchase check: {}", name);
+                    }
+                }
+                None => log::error!("Skill purchase location not found: {}", name),
+            }
+        }
+    }
+}
+
 pub const SKILL_SHOP_DECONSTRUCTOR: usize = 0x287f20;
 pub static ORIGINAL_SKILL_SHOP_DECONSTRUCTOR: OnceLock<unsafe extern "C" fn(custom_skill: usize)> =
     OnceLock::new();
 
 pub fn skill_shop_deconstructor(custom_skill: usize) {
+    if skill_manager::IN_SKILL_SHOP.load(Ordering::SeqCst) {
+        send_bought_skills();
+    }
     if let Some(orig) = ORIGINAL_SKILL_SHOP_DECONSTRUCTOR.get() {
         unsafe {
             orig(custom_skill);
         }
     }
     CANT_PURCHASE.store(false, Ordering::SeqCst);
+    if skill_manager::IN_SKILL_SHOP.load(Ordering::SeqCst) {
+        skill_manager::close_skill_shop(&ARCHIPELAGO_DATA.read().unwrap());
+    }
 }
 
 pub const PURCHASE_SKILL_SHOP_ADDR: usize = 0x288f80;
@@ -131,6 +184,16 @@ pub static ORIGINAL_PURCHASE_SKILL_SHOP: OnceLock<unsafe extern "C" fn(custom_sk
 pub fn skill_shop_purchase(custom_skill: usize) {
     if let Some(mapping) = MAPPING.read().unwrap().as_ref() {
         let mode = read_data_from_address::<u8>(custom_skill + 0x09);
+        if skill_manager::IN_SKILL_SHOP.load(Ordering::SeqCst) {
+            // Purchase checks: let the game sell the skill, then send its check
+            if let Some(orig) = ORIGINAL_PURCHASE_SKILL_SHOP.get() {
+                unsafe {
+                    orig(custom_skill);
+                }
+            }
+            send_bought_skills();
+            return;
+        }
         if mode == 0x02 || mode == 0xA {
             if mapping.randomize_skills {
                 // Prevent the display of purchase skill or not enough orbs prompts

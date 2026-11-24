@@ -4,6 +4,7 @@ use std::ops::BitOrAssign;
 
 use crate::data::game_structs::{CharacterData, GameData, SessionData};
 use bitflags::bitflags;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{LazyLock, RwLock};
 
 struct SkillData {
@@ -450,6 +451,9 @@ static EXPECTED_EXPERTISE: RwLock<Option<[u32; 8]>> = RwLock::new(None);
 /// restart. If the live flags no longer match what set_skills applied, put them back.
 /// Only writes Dante's live copy, which set_skills already writes.
 pub(crate) fn enforce_skills() {
+    if IN_SKILL_SHOP.load(Ordering::SeqCst) {
+        return;
+    }
     // Only when skills are randomized; otherwise skills bought in the shop must stick
     match crate::mapping::MAPPING.try_read() {
         Ok(mapping) if mapping.as_ref().is_some_and(|m| m.randomize_skills) => {}
@@ -476,6 +480,18 @@ pub(crate) fn clear_expected_skills() {
 }
 
 pub(crate) fn set_skills(data: &ArchipelagoData) {
+    if IN_SKILL_SHOP.load(Ordering::SeqCst) {
+        // The skill shop is showing purchase checks; received skills are put back when it closes
+        let mut expected = DEFAULT_SKILLS;
+        for skill in data.skills.iter() {
+            let skill_data = SKILLS_MAP.get(ID_SKILL_MAP.get(skill).unwrap()).unwrap();
+            expected[skill_data.index] |= skill_data.flag;
+        }
+        if let Ok(mut stored) = EXPECTED_EXPERTISE.write() {
+            *stored = Some(expected);
+        }
+        return;
+    }
     // I kinda don't like this tbh, but oh well, shouldn't really be an issue.
     reset_expertise();
     let mut ids: Vec<_> = data.skills.iter().map(|id| format!("{:#X}", id)).collect();
@@ -543,4 +559,85 @@ pub(crate) fn add_skill(id: usize, data: &mut ArchipelagoData) {
         _ => id,
     };
     data.add_skill(skill_id);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Skill shop checks: while the shop is open, Dante's skill flags show which purchase checks are
+// done (not which skills were received), so every unbought check is for sale. Buying one sets
+// its flag; the new flag is turned into a "Purchase <skill>" check. Received skills come back
+// when the shop closes.
+
+/// True while the skill shop is open with purchase checks on
+pub(crate) static IN_SKILL_SHOP: AtomicBool = AtomicBool::new(false);
+/// Skill flags at the last check, to spot newly bought skills
+static SHOP_SNAPSHOT: RwLock<Option<[u32; 8]>> = RwLock::new(None);
+
+/// Skill flags for the purchase checks already done
+pub(crate) fn purchase_check_expertise<'a>(checked: impl Iterator<Item = &'a str>) -> [u32; 8] {
+    let mut flags = DEFAULT_SKILLS;
+    for name in checked {
+        if let Some(skill) = name.strip_prefix("Purchase ")
+            && let Some(data) = SKILLS_MAP.get(skill)
+        {
+            flags[data.index] |= data.flag;
+        }
+    }
+    flags
+}
+
+/// Names of shop skills whose flag is set in `new` but not in `old`
+fn newly_bought(old: &[u32; 8], new: &[u32; 8]) -> Vec<&'static str> {
+    SKILLS_MAP
+        .iter()
+        .filter(|(_, d)| new[d.index] & d.flag != 0 && old[d.index] & d.flag == 0)
+        .map(|(name, _)| *name)
+        .collect()
+}
+
+/// Shows purchase checks in the shop. Call before the shop builds its menu.
+pub(crate) fn open_skill_shop(flags: [u32; 8]) {
+    IN_SKILL_SHOP.store(true, Ordering::SeqCst);
+    let _ = SessionData::with_mut(|s| s.expertise = flags);
+    let _ = CharacterData::with_mut(|c| c.expertise = flags);
+    if let Ok(mut snap) = SHOP_SNAPSHOT.write() {
+        *snap = Some(flags);
+    }
+    log::debug!("Skill shop opened, showing purchase checks: {:X?}", flags);
+}
+
+/// Returns skills bought since the last call (from either the session or live copy)
+pub(crate) fn take_bought_skills() -> Vec<&'static str> {
+    let Ok(mut snap) = SHOP_SNAPSHOT.write() else {
+        return vec![];
+    };
+    let Some(old) = *snap else {
+        return vec![];
+    };
+    let mut current = old;
+    if let Ok(s) = SessionData::with_read(|s| s.expertise) {
+        for i in 0..8 {
+            current[i] |= s[i];
+        }
+    }
+    if let Ok(c) = CharacterData::with_read(|c| c.expertise) {
+        for i in 0..8 {
+            current[i] |= c[i];
+        }
+    }
+    let bought = newly_bought(&old, &current);
+    if !bought.is_empty() {
+        log::debug!("Skill shop: bought {:?}", bought);
+        *snap = Some(current);
+    }
+    bought
+}
+
+/// Leaves the shop: stop showing purchase checks and put received skills back
+pub(crate) fn close_skill_shop(data: &ArchipelagoData) {
+    if let Ok(mut snap) = SHOP_SNAPSHOT.write() {
+        *snap = None;
+    }
+    IN_SKILL_SHOP.store(false, Ordering::SeqCst);
+    set_skills(data);
+    log::debug!("Skill shop closed, received skills re-applied");
 }

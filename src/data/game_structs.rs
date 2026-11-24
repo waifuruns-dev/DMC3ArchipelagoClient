@@ -151,7 +151,7 @@ pub struct CharacterData {
     _unknown2: [u8; 300],
     pub(crate) expertise: [u32; 8],
     _unknown3: [u8; 32],
-    pub(crate) queued_expertise: [u32; 8],
+    queued_expertise: [u32; 8],
     _unknown4: [u8; 160],
     pub(crate) max_hp: f32, // 0x40EC
     _unknown5: [u8; 44],
@@ -252,7 +252,7 @@ pub struct QueuedMissionActorData {
     style: u32,
     style_level: [u32; 6],
     style_exp: [f32; 6],
-    pub(crate) expertise: [u32; 8],
+    expertise: [u32; 8],
 }
 
 impl GameData for QueuedMissionActorData {

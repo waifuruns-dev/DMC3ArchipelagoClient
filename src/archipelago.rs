@@ -365,6 +365,7 @@ fn disconnect(hooks_enabled: &mut bool, hint_hooks_enabled: &mut bool) {
     MAPPING.write().unwrap().take(); // Clear mappings
     *ARCHIPELAGO_DATA.write().unwrap() = ArchipelagoData::default(); // Reset Data (Probably not needed)
     hook::restore_mode_table();
+    skill_manager::clear_expected_skills();
     log::info!("Game restored to default state");
 }
 

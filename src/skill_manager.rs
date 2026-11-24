@@ -2,11 +2,9 @@ use crate::game_manager::ArchipelagoData;
 use std::collections::HashMap;
 use std::ops::BitOrAssign;
 
-use crate::data::game_structs::{
-    ActiveMissionActorData, CharacterData, GameData, QueuedMissionActorData, SessionData,
-};
+use crate::data::game_structs::{CharacterData, GameData, SessionData};
 use bitflags::bitflags;
-use std::sync::LazyLock;
+use std::sync::{LazyLock, RwLock};
 
 struct SkillData {
     id: usize,
@@ -428,15 +426,6 @@ pub(crate) fn reset_expertise() {
     .expect("Unable to reset expertise");
     let _ = CharacterData::with_mut(|c| {
         c.expertise = DEFAULT_SKILLS;
-        c.queued_expertise = DEFAULT_SKILLS;
-    });
-    // The game rebuilds Dante's skills from these on death and room change,
-    // so they have to match too or received skills drop out until a mission restart.
-    let _ = ActiveMissionActorData::with_mut(|a| {
-        a.expertise = DEFAULT_SKILLS;
-    });
-    let _ = QueuedMissionActorData::with_mut(|q| {
-        q.expertise = DEFAULT_SKILLS;
     });
 }
 
@@ -450,14 +439,40 @@ fn give_skill(skill_id: &usize) {
 
     let _ = CharacterData::with_mut(|c| {
         c.expertise[data.index].bitor_assign(data.flag);
-        c.queued_expertise[data.index].bitor_assign(data.flag);
     });
-    let _ = ActiveMissionActorData::with_mut(|a| {
-        a.expertise[data.index].bitor_assign(data.flag);
+}
+
+/// The skill flags Dante should have right now, written by set_skills.
+static EXPECTED_EXPERTISE: RwLock<Option<[u32; 8]>> = RwLock::new(None);
+
+/// Called every game tick. The game rebuilds Dante's live skill flags on death and room
+/// change from copies the mod doesn't write, which dropped received skills until a mission
+/// restart. If the live flags no longer match what set_skills applied, put them back.
+/// Only writes Dante's live copy, which set_skills already writes.
+pub(crate) fn enforce_skills() {
+    // Only when skills are randomized; otherwise skills bought in the shop must stick
+    match crate::mapping::MAPPING.try_read() {
+        Ok(mapping) if mapping.as_ref().is_some_and(|m| m.randomize_skills) => {}
+        _ => return,
+    }
+    let Ok(expected) = EXPECTED_EXPERTISE.try_read() else {
+        return;
+    };
+    let Some(expected) = *expected else {
+        return;
+    };
+    let _ = CharacterData::with_mut(|c| {
+        if c.expertise != expected {
+            log::debug!("Game reset Dante's skills, re-applying received skills");
+            c.expertise = expected;
+        }
     });
-    let _ = QueuedMissionActorData::with_mut(|q| {
-        q.expertise[data.index].bitor_assign(data.flag);
-    });
+}
+
+pub(crate) fn clear_expected_skills() {
+    if let Ok(mut expected) = EXPECTED_EXPERTISE.write() {
+        *expected = None;
+    }
 }
 
 pub(crate) fn set_skills(data: &ArchipelagoData) {
@@ -475,6 +490,14 @@ pub(crate) fn set_skills(data: &ArchipelagoData) {
     );
     for skill in data.skills.iter() {
         give_skill(skill);
+    }
+    let mut expected = DEFAULT_SKILLS;
+    for skill in data.skills.iter() {
+        let skill_data = SKILLS_MAP.get(ID_SKILL_MAP.get(skill).unwrap()).unwrap();
+        expected[skill_data.index] |= skill_data.flag;
+    }
+    if let Ok(mut stored) = EXPECTED_EXPERTISE.write() {
+        *stored = Some(expected);
     }
 }
 

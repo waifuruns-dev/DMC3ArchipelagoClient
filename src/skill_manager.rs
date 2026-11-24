@@ -641,3 +641,10 @@ pub(crate) fn close_skill_shop(data: &ArchipelagoData) {
     set_skills(data);
     log::debug!("Skill shop closed, received skills re-applied");
 }
+
+/// Test build: log the session and live skill flags
+pub(crate) fn log_expertise(when: &str) {
+    let session = SessionData::with_read(|s| s.expertise).ok();
+    let live = CharacterData::with_read(|c| c.expertise).ok();
+    log::debug!("Skill flags {}: session {:X?}, live {:X?}", when, session, live);
+}

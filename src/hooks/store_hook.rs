@@ -140,12 +140,23 @@ pub fn skill_shop_constructor(custom_skill: usize) {
     }
 }
 
+/// Called every frame: sends checks for skills the game writes in after the shop closes
+pub(crate) fn poll_skill_purchases() {
+    let bought = skill_manager::poll_bought_skills();
+    if !bought.is_empty() {
+        send_skill_checks(bought);
+    }
+}
+
 /// Sends a "Purchase <skill>" check for each skill bought in the shop
 fn send_bought_skills() {
     let bought = skill_manager::take_bought_skills();
-    if bought.is_empty() {
-        return;
+    if !bought.is_empty() {
+        send_skill_checks(bought);
     }
+}
+
+fn send_skill_checks(bought: Vec<&'static str>) {
     if let Ok(mut core) = AP_CORE.get().unwrap().lock()
         && let Some(client) = core.connection.client_mut()
     {

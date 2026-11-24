@@ -639,6 +639,7 @@ pub(crate) fn take_bought_skills() -> Vec<&'static str> {
 
 /// Leaves the shop: stop showing purchase checks and put received skills back
 pub(crate) fn close_skill_shop(data: &ArchipelagoData) {
+    start_purchase_watch();
 
     if let Ok(mut snap) = SHOP_SNAPSHOT.write() {
         *snap = None;
@@ -682,4 +683,53 @@ pub(crate) fn watch_skill_flags() {
         );
         *last = Some(now);
     }
+}
+
+/// After the shop closes the game writes bought skills into the mission copy about a second
+/// later. (flags at shop close, when to stop watching)
+static PENDING_PURCHASES: RwLock<Option<([u32; 8], std::time::Instant)>> = RwLock::new(None);
+const PURCHASE_WATCH: std::time::Duration = std::time::Duration::from_secs(6);
+
+fn start_purchase_watch() {
+    let start = mission_expertise().unwrap_or(DEFAULT_SKILLS);
+    if let Ok(mut pending) = PENDING_PURCHASES.write() {
+        *pending = Some((start, std::time::Instant::now() + PURCHASE_WATCH));
+    }
+}
+
+/// Called every frame: skills newly written into the mission copy after the shop closed, not
+/// counting skills that were received as items
+pub(crate) fn poll_bought_skills() -> Vec<&'static str> {
+    let Ok(mut pending) = PENDING_PURCHASES.try_write() else {
+        return vec![];
+    };
+    let Some((prev, until)) = *pending else {
+        return vec![];
+    };
+    if std::time::Instant::now() > until {
+        *pending = None;
+        return vec![];
+    }
+    let Some(now) = mission_expertise() else {
+        return vec![];
+    };
+    let received = EXPECTED_EXPERTISE
+        .read()
+        .ok()
+        .and_then(|e| *e)
+        .unwrap_or(DEFAULT_SKILLS);
+    let bought: Vec<&'static str> = newly_bought(&prev, &now)
+        .into_iter()
+        .filter(|name| {
+            let d = SKILLS_MAP.get(name).unwrap();
+            received[d.index] & d.flag == 0
+        })
+        .collect();
+    if now != prev {
+        *pending = Some((now, until));
+    }
+    if !bought.is_empty() {
+        log::debug!("Skill shop: bought {:?} (written after the shop closed)", bought);
+    }
+    bought
 }

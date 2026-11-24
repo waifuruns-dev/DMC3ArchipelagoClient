@@ -445,6 +445,16 @@ fn give_skill(skill_id: &usize) {
 pub(crate) fn set_skills(data: &ArchipelagoData) {
     // I kinda don't like this tbh, but oh well, shouldn't really be an issue.
     reset_expertise();
+    let mut ids: Vec<_> = data.skills.iter().map(|id| format!("{:#X}", id)).collect();
+    ids.sort();
+    log::debug!(
+        "Applying skills: [{}] (Stinger {}, Jet Stream {}, Reverb {}, Uppercut {})",
+        ids.join(", "),
+        data.stinger_level,
+        data.jet_stream_level,
+        data.reverb_level,
+        data.beowulf_level
+    );
     for skill in data.skills.iter() {
         give_skill(skill);
     }

@@ -134,7 +134,7 @@ pub fn skill_shop_constructor(custom_skill: usize) {
         }
     }
     if skill_checks && let Ok(flags) = SessionData::with_read(|s| s.expertise) {
-        skill_manager::find_shop_copy(custom_skill, flags);
+        skill_manager::find_shop_copy(flags);
     }
     if let Some(mapping) = MAPPING.read().unwrap().as_ref()
         && mapping.randomize_skills
@@ -213,17 +213,7 @@ pub fn skill_shop_purchase(custom_skill: usize) {
                 skill_manager::IN_SKILL_SHOP.load(Ordering::SeqCst)
             );
             if skill_manager::IN_SKILL_SHOP.load(Ordering::SeqCst) {
-                // The shop may build its copy after the constructor; look again until found
-                if skill_manager::SHOP_COPY_ADDR.load(Ordering::SeqCst) == 0
-                    && let Ok(flags) = SessionData::with_read(|s| s.expertise)
-                {
-                    skill_manager::find_shop_copy(custom_skill, flags);
-                }
                 skill_manager::log_expertise("shop mode change");
-                // Test build: dump the shop object's first 0x200 bytes as u32s, to find where it
-                // keeps bought skills if not in the session
-                let words = read_data_from_address::<[u32; 128]>(custom_skill);
-                log::debug!("Shop object: {:X?}", words);
             }
         }
         if skill_manager::IN_SKILL_SHOP.load(Ordering::SeqCst) {

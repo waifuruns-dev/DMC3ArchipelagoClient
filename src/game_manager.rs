@@ -91,6 +91,16 @@ impl ArchipelagoData {
         self.style_levels = [0; 4];
     }
 
+    /// Clears skills and the progressive skill counters, so replaying the received item list
+    /// doesn't add an extra level every time (e.g. Stinger 2 after one Progressive Stinger).
+    pub(crate) fn reset_skills(&mut self) {
+        self.skills.clear();
+        self.stinger_level = 0;
+        self.jet_stream_level = 0;
+        self.reverb_level = 0;
+        self.beowulf_level = 0;
+    }
+
     pub(crate) fn get_style_unlocked(&self) -> [bool; 4] {
         let mut style_table = [false; 4];
         for (out, level) in style_table.iter_mut().zip(self.style_levels.iter()) {

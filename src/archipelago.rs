@@ -455,6 +455,12 @@ pub fn handle_received_items_packet(
                 data.purple_orbs = 0;
                 data.reset_gun_levels();
                 data.reset_style_levels();
+                data.reset_skills();
+                log::debug!(
+                    "Rebuilding received items (index {}, {} items)",
+                    index,
+                    client.received_items().len()
+                );
 
                 for item in client.received_items().iter() {
                     // Display overlay text if we're not at the main menu
@@ -609,6 +615,11 @@ pub fn handle_received_items_packet(
                 log::error!("Failed to write archipelago data: {}", err);
             }
         }
+    } else {
+        log::debug!(
+            "Skipped rebuilding received items (index {}): game session not ready",
+            index
+        );
     }
     Ok(())
 }

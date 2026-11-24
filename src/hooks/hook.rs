@@ -387,7 +387,7 @@ fn item_spawns_hook(unknown: usize) {
                     // modify_secret_mission_item(mapping);
                     for _i in 0..item_count {
                         let item_ref: &u32 = &*(item_addr as *const u32);
-                        const EXTRA_OUTPUT: bool = false;
+                        const EXTRA_OUTPUT: bool = true; // Test build: log every item spawn
                         if EXTRA_OUTPUT {
                             log::debug!("Item ID: {} ({:#X})", get_item_name(*item_ref), *item_ref);
                         }
@@ -565,6 +565,11 @@ fn set_relevant_key_items() {
                         if data.items.contains(*item) {
                             let res = game_manager::has_item_by_flags(item);
                             if !res {
+                                log::debug!(
+                                    "Giving back key item {} in room {} (game flags said not held)",
+                                    item,
+                                    get_room()
+                                );
                                 set_item(item, true, true);
                             }
                             log::debug!(

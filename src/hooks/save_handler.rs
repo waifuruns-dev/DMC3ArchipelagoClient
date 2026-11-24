@@ -1,5 +1,4 @@
 use crate::archipelago::CONNECTED;
-use crate::game_manager::{ARCHIPELAGO_DATA, ArchipelagoData};
 use crate::tracker::initial_connection_updates;
 use crate::utilities::DMC3_ADDRESS;
 use crate::{AP_CORE, archipelago, create_hook, utilities};
@@ -160,7 +159,6 @@ fn load_slot(param_1: usize, save_index: i32) {
                 Ok(sync_data) => {
                     CURRENT_INDEX
                         .store(sync_data.sync_index[save_index as usize], Ordering::SeqCst);
-                    *ARCHIPELAGO_DATA.write().unwrap() = ArchipelagoData::default();
                     if let Err(e) = archipelago::handle_received_items_packet(
                         sync_data.sync_index[save_index as usize] as usize,
                         client,

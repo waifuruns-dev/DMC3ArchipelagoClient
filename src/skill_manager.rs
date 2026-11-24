@@ -452,9 +452,6 @@ static EXPECTED_EXPERTISE: RwLock<Option<[u32; 8]>> = RwLock::new(None);
 /// restart. If the live flags no longer match what set_skills applied, put them back.
 /// Only writes Dante's live copy, which set_skills already writes.
 pub(crate) fn enforce_skills() {
-    if IN_SKILL_SHOP.load(Ordering::SeqCst) {
-        return;
-    }
     // Only when skills are randomized; otherwise skills bought in the shop must stick
     match crate::mapping::MAPPING.try_read() {
         Ok(mapping) if mapping.as_ref().is_some_and(|m| m.randomize_skills) => {}
@@ -481,18 +478,6 @@ pub(crate) fn clear_expected_skills() {
 }
 
 pub(crate) fn set_skills(data: &ArchipelagoData) {
-    if IN_SKILL_SHOP.load(Ordering::SeqCst) {
-        // The skill shop is showing purchase checks; received skills are put back when it closes
-        let mut expected = DEFAULT_SKILLS;
-        for skill in data.skills.iter() {
-            let skill_data = SKILLS_MAP.get(ID_SKILL_MAP.get(skill).unwrap()).unwrap();
-            expected[skill_data.index] |= skill_data.flag;
-        }
-        if let Ok(mut stored) = EXPECTED_EXPERTISE.write() {
-            *stored = Some(expected);
-        }
-        return;
-    }
     // I kinda don't like this tbh, but oh well, shouldn't really be an issue.
     reset_expertise();
     let mut ids: Vec<_> = data.skills.iter().map(|id| format!("{:#X}", id)).collect();
@@ -598,8 +583,9 @@ fn newly_bought(old: &[u32; 8], new: &[u32; 8]) -> Vec<&'static str> {
 /// Shows purchase checks in the shop. Call before the shop builds its menu.
 pub(crate) fn open_skill_shop(flags: [u32; 8]) {
     IN_SKILL_SHOP.store(true, Ordering::SeqCst);
-    let _ = SessionData::with_mut(|s| s.expertise = flags);
-    let _ = CharacterData::with_mut(|c| c.expertise = flags);
+    // Only the "next start" list, which the shop shows from. Dante's saved and live skills are
+    // never given purchase checks.
+    let _ = crate::data::game_structs::QueuedMissionActorData::with_mut(|q| q.expertise = flags);
     if let Ok(mut snap) = SHOP_SNAPSHOT.write() {
         *snap = Some(flags);
     }
@@ -630,7 +616,19 @@ pub(crate) fn take_bought_skills() -> Vec<&'static str> {
             current[i] |= m[i];
         }
     }
-    let mut bought = newly_bought(&old, &current);
+    let received = EXPECTED_EXPERTISE
+        .read()
+        .ok()
+        .and_then(|e| *e)
+        .unwrap_or(DEFAULT_SKILLS);
+    // Skills received as items are in Dante's lists too; they aren't purchases
+    let mut bought: Vec<&'static str> = newly_bought(&old, &current)
+        .into_iter()
+        .filter(|name| {
+            let d = SKILLS_MAP.get(name).unwrap();
+            received[d.index] & d.flag == 0
+        })
+        .collect();
     if let Ok(mut reported) = REPORTED_PURCHASES.write() {
         bought.retain(|name| !reported.contains(name));
         reported.extend(bought.iter().copied());
@@ -698,6 +696,19 @@ static REPORTED_PURCHASES: LazyLock<RwLock<std::collections::HashSet<&'static st
 static PENDING_PURCHASES: RwLock<Option<([u32; 8], std::time::Instant)>> = RwLock::new(None);
 const PURCHASE_WATCH: std::time::Duration = std::time::Duration::from_secs(6);
 
+/// Puts the mission's "right now" and "next start" skill lists back to the received skills
+fn restore_mission_skills(why: &str) {
+    if IN_SKILL_SHOP.load(Ordering::SeqCst) {
+        return;
+    }
+    let Some(received) = EXPECTED_EXPERTISE.read().ok().and_then(|e| *e) else {
+        return;
+    };
+    let _ = crate::data::game_structs::ActiveMissionActorData::with_mut(|a| a.expertise = received);
+    let _ = crate::data::game_structs::QueuedMissionActorData::with_mut(|q| q.expertise = received);
+    log::debug!("Skill shop: mission skill lists restored to received skills ({})", why);
+}
+
 fn start_purchase_watch() {
     let start = mission_expertise().unwrap_or(DEFAULT_SKILLS);
     if let Ok(mut pending) = PENDING_PURCHASES.write() {
@@ -716,15 +727,7 @@ pub(crate) fn poll_bought_skills() -> Vec<&'static str> {
     };
     if std::time::Instant::now() > until {
         *pending = None;
-        // Done watching: put the mission copy back to the skills actually received
-        if !IN_SKILL_SHOP.load(Ordering::SeqCst)
-            && let Some(received) = EXPECTED_EXPERTISE.read().ok().and_then(|e| *e)
-        {
-            let _ = crate::data::game_structs::ActiveMissionActorData::with_mut(|a| {
-                a.expertise = received
-            });
-            log::debug!("Skill shop: mission skill copy restored to received skills");
-        }
+        restore_mission_skills("watch ended");
         return vec![];
     }
     let Some(now) = mission_expertise() else {
@@ -750,8 +753,12 @@ pub(crate) fn poll_bought_skills() -> Vec<&'static str> {
         .map(|(name, _)| *name)
         .collect();
     reported.extend(bought.iter().copied());
+    drop(reported);
     if now != prev {
-        *pending = Some((now, until));
+        // The game has written the purchase: put both mission lists straight back to the
+        // skills actually received
+        *pending = None;
+        restore_mission_skills("purchase read");
     }
     if !bought.is_empty() {
         log::debug!("Skill shop: bought {:?} (written after the shop closed)", bought);

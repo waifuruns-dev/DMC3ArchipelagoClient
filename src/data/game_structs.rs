@@ -252,7 +252,9 @@ pub struct QueuedMissionActorData {
     style: u32,
     style_level: [u32; 6],
     style_exp: [f32; 6],
-    expertise: [u32; 8],
+    /// The "next start" skill list (MissionData ptr + 0x14C, confirmed in game logs). The skill
+    /// shop shows bought/unbought from this, and the game reloads it on mission start.
+    pub(crate) expertise: [u32; 8],
 }
 
 impl GameData for QueuedMissionActorData {

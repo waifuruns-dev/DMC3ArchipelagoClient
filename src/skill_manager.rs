@@ -555,6 +555,8 @@ pub(crate) fn add_skill(id: usize, data: &mut ArchipelagoData) {
 
 /// True while the skill shop is open with purchase checks on
 pub(crate) static IN_SKILL_SHOP: AtomicBool = AtomicBool::new(false);
+/// What the shop was shown when it opened (finished purchase checks only)
+static SHOP_OPEN_FLAGS: RwLock<Option<[u32; 8]>> = RwLock::new(None);
 /// Skill flags at the last check, to spot newly bought skills
 static SHOP_SNAPSHOT: RwLock<Option<[u32; 8]>> = RwLock::new(None);
 
@@ -586,6 +588,12 @@ pub(crate) fn open_skill_shop(flags: [u32; 8]) {
     // Only the "next start" list, which the shop shows from. Dante's saved and live skills are
     // never given purchase checks.
     let _ = crate::data::game_structs::QueuedMissionActorData::with_mut(|q| q.expertise = flags);
+    // The shop shows from the mission's "right now" list (received skills showed as learned).
+    // Put back to received skills about a second after the shop closes.
+    let _ = crate::data::game_structs::ActiveMissionActorData::with_mut(|a| a.expertise = flags);
+    if let Ok(mut open) = SHOP_OPEN_FLAGS.write() {
+        *open = Some(flags);
+    }
     if let Ok(mut snap) = SHOP_SNAPSHOT.write() {
         *snap = Some(flags);
     }
@@ -600,35 +608,12 @@ pub(crate) fn take_bought_skills() -> Vec<&'static str> {
     let Some(old) = *snap else {
         return vec![];
     };
-    let mut current = old;
-    if let Ok(s) = SessionData::with_read(|s| s.expertise) {
-        for i in 0..8 {
-            current[i] |= s[i];
-        }
-    }
-    if let Ok(c) = CharacterData::with_read(|c| c.expertise) {
-        for i in 0..8 {
-            current[i] |= c[i];
-        }
-    }
-    if let Some(m) = mission_expertise() {
-        for i in 0..8 {
-            current[i] |= m[i];
-        }
-    }
-    let received = EXPECTED_EXPERTISE
-        .read()
-        .ok()
-        .and_then(|e| *e)
-        .unwrap_or(DEFAULT_SKILLS);
-    // Skills received as items are in Dante's lists too; they aren't purchases
-    let mut bought: Vec<&'static str> = newly_bought(&old, &current)
-        .into_iter()
-        .filter(|name| {
-            let d = SKILLS_MAP.get(name).unwrap();
-            received[d.index] & d.flag == 0
-        })
-        .collect();
+    // Only the mission list the shop uses: Dante's saved and live lists hold received skills,
+    // which aren't purchases
+    let Some(current) = mission_expertise() else {
+        return vec![];
+    };
+    let mut bought = newly_bought(&old, &current);
     if let Ok(mut reported) = REPORTED_PURCHASES.write() {
         bought.retain(|name| !reported.contains(name));
         reported.extend(bought.iter().copied());
@@ -694,7 +679,7 @@ pub(crate) fn watch_skill_flags() {
 static REPORTED_PURCHASES: LazyLock<RwLock<std::collections::HashSet<&'static str>>> =
     LazyLock::new(|| RwLock::new(std::collections::HashSet::new()));
 static PENDING_PURCHASES: RwLock<Option<([u32; 8], std::time::Instant)>> = RwLock::new(None);
-const PURCHASE_WATCH: std::time::Duration = std::time::Duration::from_secs(6);
+const PURCHASE_WATCH: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// Puts the mission's "right now" and "next start" skill lists back to the received skills
 fn restore_mission_skills(why: &str) {
@@ -733,21 +718,25 @@ pub(crate) fn poll_bought_skills() -> Vec<&'static str> {
     let Some(now) = mission_expertise() else {
         return vec![];
     };
-    let received = EXPECTED_EXPERTISE
+    // The game writes "what the shop showed + skills bought this visit". Anything new is a
+    // purchase (even a skill already received as an item); ones already sent are skipped.
+    let shown = SHOP_OPEN_FLAGS
         .read()
         .ok()
-        .and_then(|e| *e)
+        .and_then(|f| *f)
         .unwrap_or(DEFAULT_SKILLS);
-    // The game writes "skills it had + skills bought this visit". Anything there that wasn't
-    // received as an item is a purchase; ones already sent are skipped.
+    // The shop's write keeps everything it showed. If the list was replaced some other way
+    // (e.g. a mission restart reloading received skills), it isn't a purchase.
+    let from_shop = (0..8).all(|i| now[i] & shown[i] == shown[i]);
     let Ok(mut reported) = REPORTED_PURCHASES.write() else {
         return vec![];
     };
     let bought: Vec<&'static str> = SKILLS_MAP
         .iter()
         .filter(|(name, d)| {
-            now[d.index] & d.flag != 0
-                && received[d.index] & d.flag == 0
+            from_shop
+                && now[d.index] & d.flag != 0
+                && shown[d.index] & d.flag == 0
                 && !reported.contains(*name)
         })
         .map(|(name, _)| *name)

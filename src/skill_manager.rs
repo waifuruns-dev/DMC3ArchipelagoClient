@@ -555,6 +555,8 @@ pub(crate) fn add_skill(id: usize, data: &mut ArchipelagoData) {
 
 /// True while the skill shop is open with purchase checks on
 pub(crate) static IN_SKILL_SHOP: AtomicBool = AtomicBool::new(false);
+/// What the shop's copy was set to when it opened (finished purchase checks), if it was found
+static SHOP_OPEN_FLAGS: RwLock<Option<[u32; 8]>> = RwLock::new(None);
 /// Skill flags at the last check, to spot newly bought skills
 static SHOP_SNAPSHOT: RwLock<Option<[u32; 8]>> = RwLock::new(None);
 
@@ -583,8 +585,21 @@ fn newly_bought(old: &[u32; 8], new: &[u32; 8]) -> Vec<&'static str> {
 /// Shows purchase checks in the shop. Call before the shop builds its menu.
 pub(crate) fn open_skill_shop(flags: [u32; 8]) {
     IN_SKILL_SHOP.store(true, Ordering::SeqCst);
-    // Nothing is written to the game here: the shop shows a copy of the saved skills taken when
-    // the Divinity Statue menu opens (still being located), so writes at this point are ignored.
+    // Show finished purchase checks in the shop's own copy (only this list; received skills
+    // stay buyable for their checks)
+    let shown = match shop_copy_addrs() {
+        Some((copy, _)) => {
+            write_list(copy, flags);
+            Some(flags)
+        }
+        None => {
+            log::warn!("Skill shop: couldn't find the shop's skill list; bought checks won't show");
+            None
+        }
+    };
+    if let Ok(mut open) = SHOP_OPEN_FLAGS.write() {
+        *open = shown;
+    }
     if let Ok(mut snap) = SHOP_SNAPSHOT.write() {
         *snap = Some(flags);
     }
@@ -693,6 +708,10 @@ fn restore_mission_skills(why: &str) {
     };
     let _ = crate::data::game_structs::ActiveMissionActorData::with_mut(|a| a.expertise = received);
     let _ = crate::data::game_structs::QueuedMissionActorData::with_mut(|q| q.expertise = received);
+    if let Some((copy, result)) = shop_copy_addrs() {
+        write_list(copy, received);
+        write_list(result, received);
+    }
     log::debug!("Skill shop: mission skill lists restored to received skills ({})", why);
 }
 
@@ -720,25 +739,45 @@ pub(crate) fn poll_bought_skills() -> Vec<&'static str> {
     let Some(now) = mission_expertise() else {
         return vec![];
     };
-    // The game writes "the saved skills it copied + skills bought this visit". Anything there
-    // that wasn't received as an item is a purchase; ones already sent are skipped.
     let received = EXPECTED_EXPERTISE
         .read()
         .ok()
         .and_then(|e| *e)
         .unwrap_or(DEFAULT_SKILLS);
+    // The game writes "what the shop's copy held + skills bought this visit". If the copy was
+    // set to purchase checks, anything new on top of it is a purchase (even a skill received as
+    // an item), and a write that doesn't keep it (e.g. a mission restart) isn't from the shop.
+    // Otherwise anything beyond received skills is a purchase.
+    let shown = SHOP_OPEN_FLAGS.read().ok().and_then(|f| *f);
+    let base = shown.unwrap_or(received);
+    let from_shop = shown.is_none_or(|s| (0..8).all(|i| now[i] & s[i] == s[i]));
     let Ok(mut reported) = REPORTED_PURCHASES.write() else {
         return vec![];
     };
     let bought: Vec<&'static str> = SKILLS_MAP
         .iter()
         .filter(|(name, d)| {
-            now[d.index] & d.flag != 0
-                && received[d.index] & d.flag == 0
+            from_shop
+                && now[d.index] & d.flag != 0
+                && base[d.index] & d.flag == 0
                 && !reported.contains(*name)
         })
         .map(|(name, _)| *name)
         .collect();
+    if from_shop && now != prev {
+        // Flags the game added that no shop skill uses: the skill table has a wrong value
+        for i in 0..8 {
+            let mut added = now[i] & !base[i];
+            for d in SKILLS_MAP.values() {
+                if d.index == i {
+                    added &= !d.flag;
+                }
+            }
+            if added != 0 {
+                log::warn!("Skill shop: bought a skill with unknown flag {:#X} in word {}", added, i);
+            }
+        }
+    }
     reported.extend(bought.iter().copied());
     drop(reported);
     if now != prev {
@@ -758,10 +797,6 @@ pub(crate) fn poll_bought_skills() -> Vec<&'static str> {
 // game memory for skill lists and logs where they are and when they change. Nothing here is
 // used to send checks or written back to the game.
 
-/// Skill lists found when the shop last opened
-static SKILL_COPY_ADDRS: RwLock<Vec<usize>> = RwLock::new(Vec::new());
-/// Last logged values of those lists
-static SKILL_COPY_VALUES: RwLock<Vec<Option<[u32; 8]>>> = RwLock::new(Vec::new());
 
 /// Reads game memory without risking a crash: an unreadable or freed address returns None
 fn safe_read(addr: usize, buf: &mut [u8]) -> bool {
@@ -793,189 +828,38 @@ fn read_copy(addr: usize) -> Option<[u32; 8]> {
     Some(words)
 }
 
-/// Where an address sits, relative to the game structs we know
-fn describe_addr(addr: usize, shop: usize) -> String {
-    let module = *crate::DMC3_ADDRESS;
-    let mission = if crate::data::game_structs::MissionData::is_valid() {
-        randomizer_utilities::read_data_from_address::<usize>(
-            crate::data::game_structs::MissionData::ptr(),
-        )
+
+// The skill shop's own copy of the skills. The game copies the saved skills into it when the
+// Divinity Statue menu opens, the shop shows bought/unbought from it, and purchases are added to
+// it. Found through a pointer in the game's data (same in two launches, confirmed in logs).
+const SHOP_COPY_POINTER: usize = 0xC9DDB8;
+/// The list the shop shows and adds purchases to
+const SHOP_COPY_OFFSET: usize = 0x9E4;
+/// Where the game puts the result when the shop closes
+const SHOP_RESULT_OFFSET: usize = 0xAB4;
+
+/// Addresses of the shop's copy and result lists, only if they look like skill lists
+fn shop_copy_addrs() -> Option<(usize, usize)> {
+    let mut ptr = [0u8; 8];
+    if !safe_read(*crate::DMC3_ADDRESS + SHOP_COPY_POINTER, &mut ptr) {
+        return None;
+    }
+    let base = u64::from_le_bytes(ptr) as usize;
+    if base == 0 {
+        return None;
+    }
+    let looks_right = |a: usize| {
+        read_copy(a).is_some_and(|w| w[4] == DEFAULT_SKILLS[4] && w[5] == DEFAULT_SKILLS[5])
+    };
+    let copy = base + SHOP_COPY_OFFSET;
+    let result = base + SHOP_RESULT_OFFSET;
+    if looks_right(copy) && looks_right(result) {
+        Some((copy, result))
     } else {
-        0
-    };
-    let mut parts = vec![];
-    for (label, base, range) in [
-        ("game", module, 0x2000000usize),
-        ("mission", mission, 0x10000),
-        ("shop", shop, 0x10000),
-    ] {
-        if base != 0 && addr >= base && addr < base + range {
-            parts.push(format!("{}+{:#X}", label, addr - base));
-        }
-    }
-    parts.join(", ")
-}
-
-/// Test build: searches all of the game's memory (safely) for skill lists (words 4 and 5 never
-/// change, so they mark one) and logs them. Read-only. Takes a few seconds.
-pub(crate) fn find_skill_copies(when: &str, shop: usize) {
-    use windows::Win32::System::Memory::{
-        MEM_COMMIT, MEMORY_BASIC_INFORMATION, PAGE_GUARD, PAGE_NOACCESS, VirtualQuery,
-    };
-    const CHUNK: usize = 0x10_0000;
-    let started = std::time::Instant::now();
-    let dll_base = find_skill_copies as usize & !0xFFFF_FFFF; // skip the mod's own memory roughly
-    let mut found: Vec<usize> = vec![];
-    let mut buf = vec![0u8; CHUNK + 32];
-    let mut addr: usize = 0x10000;
-    while addr < 0x7FFF_FFFF_0000 && found.len() < 128 {
-        let mut info = MEMORY_BASIC_INFORMATION::default();
-        let size = unsafe {
-            VirtualQuery(Some(addr as *const _), &mut info, size_of::<MEMORY_BASIC_INFORMATION>())
-        };
-        if size == 0 {
-            break;
-        }
-        let base = info.BaseAddress as usize;
-        let region_end = base + info.RegionSize;
-        if info.State == MEM_COMMIT
-            && info.Protect.0 != 0
-            && info.Protect.0 & (PAGE_GUARD.0 | PAGE_NOACCESS.0) == 0
-            && base & !0xFFFF_FFFF != dll_base
-        {
-            let mut p = base;
-            while p < region_end && found.len() < 128 {
-                let len = (region_end - p).min(CHUNK);
-                if len >= 32 && safe_read(p, &mut buf[..len]) {
-                    let mut i = 0;
-                    while i + 32 <= len {
-                        let w4 = u32::from_le_bytes(buf[i + 16..i + 20].try_into().unwrap());
-                        if w4 == DEFAULT_SKILLS[4]
-                            && u32::from_le_bytes(buf[i + 20..i + 24].try_into().unwrap())
-                                == DEFAULT_SKILLS[5]
-                        {
-                            found.push(p + i);
-                        }
-                        i += 4;
-                    }
-                }
-                p += len;
-            }
-        }
-        addr = region_end.max(addr + 0x1000);
-    }
-    log::debug!(
-        "Skill list search ({}): {} found in {:?}",
-        when,
-        found.len(),
-        started.elapsed()
-    );
-    let mut values = vec![];
-    for &a in &found {
-        let v = read_copy(a);
-        log::debug!("  {:#X} [{}]: {:X?}", a, describe_addr(a, shop), v);
-        values.push(v);
-    }
-    find_pointers_to(&found);
-    if let Ok(mut addrs) = SKILL_COPY_ADDRS.write() {
-        *addrs = found;
-    }
-    if let Ok(mut vals) = SKILL_COPY_VALUES.write() {
-        *vals = values;
+        None
     }
 }
 
-/// Test build: looks through the game's own data (the exe's memory) for pointers to, or up to
-/// 0x8000 bytes before, each skill list found, so it can be found again after a relaunch.
-/// Read-only.
-fn find_pointers_to(found: &[usize]) {
-    use windows::Win32::System::Memory::{
-        MEM_COMMIT, MEMORY_BASIC_INFORMATION, PAGE_GUARD, PAGE_NOACCESS, VirtualQuery,
-    };
-    const RANGE: usize = 0x8000;
-    let module = *crate::DMC3_ADDRESS;
-    let targets: Vec<usize> = found
-        .iter()
-        .copied()
-        .filter(|&a| !(a >= module && a < module + 0x4000000))
-        .collect();
-    if targets.is_empty() {
-        return;
-    }
-    let started = std::time::Instant::now();
-    let mut hits: Vec<String> = vec![];
-    let mut buf = vec![0u8; 0x10_0000];
-    let mut addr = module;
-    while addr < module + 0x4000000 && hits.len() < 200 {
-        let mut info = MEMORY_BASIC_INFORMATION::default();
-        let size = unsafe {
-            VirtualQuery(Some(addr as *const _), &mut info, size_of::<MEMORY_BASIC_INFORMATION>())
-        };
-        if size == 0 || info.AllocationBase as usize != module {
-            break;
-        }
-        let base = info.BaseAddress as usize;
-        let region_end = base + info.RegionSize;
-        if info.State == MEM_COMMIT
-            && info.Protect.0 != 0
-            && info.Protect.0 & (PAGE_GUARD.0 | PAGE_NOACCESS.0) == 0
-        {
-            let mut p = base;
-            while p < region_end {
-                let len = (region_end - p).min(buf.len());
-                if len >= 8 && safe_read(p, &mut buf[..len]) {
-                    let mut i = 0;
-                    while i + 8 <= len {
-                        let v = u64::from_le_bytes(buf[i..i + 8].try_into().unwrap()) as usize;
-                        for &t in &targets {
-                            if v <= t && t - v < RANGE {
-                                hits.push(format!(
-                                    "game+{:#X} = {:#X} (list at +{:#X})",
-                                    p + i - module,
-                                    v,
-                                    t - v
-                                ));
-                            }
-                        }
-                        i += 8;
-                    }
-                }
-                p += len;
-            }
-        }
-        addr = region_end;
-    }
-    log::debug!(
-        "Pointers to skill lists in game data ({} found in {:?}):",
-        hits.len(),
-        started.elapsed()
-    );
-    for h in hits {
-        log::debug!("  {}", h);
-    }
-}
-
-/// Called every frame: logs any found skill list whose value changed
-pub(crate) fn watch_skill_copies() {
-    let Ok(addrs) = SKILL_COPY_ADDRS.try_read() else {
-        return;
-    };
-    let Ok(mut vals) = SKILL_COPY_VALUES.try_write() else {
-        return;
-    };
-    for (i, &a) in addrs.iter().enumerate() {
-        let now = read_copy(a);
-        if vals.get(i) != Some(&now) {
-            // Only log while it still looks like a skill list (scratch memory gets reused)
-            if let Some(w) = now
-                && w[4] == DEFAULT_SKILLS[4]
-                && w[5] == DEFAULT_SKILLS[5]
-            {
-                log::debug!("Skill list {:#X} changed: {:X?}", a, w);
-            }
-            if let Some(v) = vals.get_mut(i) {
-                *v = now;
-            }
-        }
-    }
+fn write_list(addr: usize, flags: [u32; 8]) {
+    unsafe { std::ptr::write_unaligned(addr as *mut [u32; 8], flags) }
 }

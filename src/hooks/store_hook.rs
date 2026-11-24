@@ -132,9 +132,6 @@ pub fn skill_shop_constructor(custom_skill: usize) {
             orig(custom_skill);
         }
     }
-    if skill_checks {
-        skill_manager::find_skill_copies("shop opened", custom_skill); // Test build logging
-    }
     if let Some(mapping) = MAPPING.read().unwrap().as_ref()
         && mapping.randomize_skills
         && !mapping.shop_skill_checks

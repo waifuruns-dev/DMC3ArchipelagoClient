@@ -113,7 +113,6 @@ fn main_loop_hook() {
     // Keep received skills applied after the game resets them (death, room change)
     skill_manager::enforce_skills();
     skill_manager::watch_skill_flags(); // Test build logging
-    skill_manager::watch_skill_copies(); // Test build logging
     hooks::store_hook::poll_skill_purchases();
 
     if !config::CONFIG.connections.disable_auto_connect

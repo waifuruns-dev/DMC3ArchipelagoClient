@@ -14,7 +14,7 @@ serde = { version = "1.0.228", features = ["derive"] }
 [dependencies]
 archipelago_rs = { path = "../archipelago_rs" }
 bimap = {workspace = true}
-windows = { workspace = true, features = ["Win32_System_Memory"] }
+windows = { workspace = true, features = ["Win32_System_Memory", "Win32_System_Diagnostics_Debug", "Win32_System_Threading"] }
 randomizer_utilities = { path = "../randomizer_utilities", features = ["dmc"] }
 log = { workspace = true }
 anyhow = { workspace = true }

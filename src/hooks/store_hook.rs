@@ -123,7 +123,6 @@ pub fn skill_shop_constructor(custom_skill: usize) {
             }
         };
         drop(core);
-        skill_manager::find_skill_copies("before shop builds", custom_skill);
         skill_manager::open_skill_shop(skill_manager::purchase_check_expertise(
             checked.iter().map(|s| s.as_str()),
         ));
@@ -196,7 +195,6 @@ pub fn skill_shop_deconstructor(custom_skill: usize) {
     log::info!("Skill shop deconstructor ({:#X})", custom_skill);
     if skill_manager::IN_SKILL_SHOP.load(Ordering::SeqCst) {
         skill_manager::log_expertise("before shop close");
-        skill_manager::log_shop_data_changes("before shop close");
         send_bought_skills();
     }
     if let Some(orig) = ORIGINAL_SKILL_SHOP_DECONSTRUCTOR.get() {
@@ -232,7 +230,6 @@ pub fn skill_shop_purchase(custom_skill: usize) {
             );
             if skill_manager::IN_SKILL_SHOP.load(Ordering::SeqCst) {
                 skill_manager::log_expertise("shop mode change");
-                skill_manager::log_shop_data_changes(&format!("mode {:#X}", mode));
             }
         }
         if skill_manager::IN_SKILL_SHOP.load(Ordering::SeqCst) {

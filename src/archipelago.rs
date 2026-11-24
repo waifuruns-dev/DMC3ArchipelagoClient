@@ -433,7 +433,27 @@ fn handle_item_receive(
                 name
             );
         }
-        None => Err(anyhow::anyhow!("Location not found: {}", location_key))?,
+        None => {
+            // Picked up before the server answered the room's scout (e.g. the Mission 2
+            // Vital Star right at the start of the mission). The server knows what is
+            // there, so send the check by name instead of dropping it and reconnecting.
+            log::warn!(
+                "Location {} wasn't scouted yet, sending the check anyway",
+                location_key
+            );
+            match client.this_game().location_by_name(location_key) {
+                Some(location) => {
+                    let id = location.id();
+                    location_handler::edit_end_event(location_key);
+                    if let Err(arch_err) = client.mark_checked(vec![location]) {
+                        log::error!("Failed to check location: {}", arch_err);
+                        item_sync::add_offline_check(id);
+                    }
+                    log::info!("Location check sent without scout: {}", location_key);
+                }
+                None => Err(anyhow::anyhow!("Location not found: {}", location_key))?,
+            }
+        }
     }
     Ok(())
 }

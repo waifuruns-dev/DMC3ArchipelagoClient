@@ -958,8 +958,10 @@ impl Style {
 
 /// Rooms where a location's item can spawn again, outside the room the location lists.
 /// (room, item id, location name)
-pub const ALTERNATE_SPAWNS: [(i32, u32, &str); 1] = [
+pub const ALTERNATE_SPAWNS: [(i32, u32, &str); 2] = [
     // Artemis spawns again in Mission 16 (room 117) if it wasn't collected in Mission 6.
     // Without this the pickup is taken away (handle_item_receive) but no location is found.
     (117, 0x1E, "Mission #6 - Artemis"),
+    // Spiral spawns in Mission 14 (room 225) if you don't own it; Mission 9 uses room 206.
+    (225, 0x1F, "Mission #9 - Spiral"),
 ];

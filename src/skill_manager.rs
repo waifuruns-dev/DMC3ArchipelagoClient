@@ -2,7 +2,9 @@ use crate::game_manager::ArchipelagoData;
 use std::collections::HashMap;
 use std::ops::BitOrAssign;
 
-use crate::data::game_structs::{CharacterData, GameData, SessionData};
+use crate::data::game_structs::{
+    ActiveMissionActorData, CharacterData, GameData, QueuedMissionActorData, SessionData,
+};
 use bitflags::bitflags;
 use std::sync::LazyLock;
 
@@ -426,6 +428,15 @@ pub(crate) fn reset_expertise() {
     .expect("Unable to reset expertise");
     let _ = CharacterData::with_mut(|c| {
         c.expertise = DEFAULT_SKILLS;
+        c.queued_expertise = DEFAULT_SKILLS;
+    });
+    // The game rebuilds Dante's skills from these on death and room change,
+    // so they have to match too or received skills drop out until a mission restart.
+    let _ = ActiveMissionActorData::with_mut(|a| {
+        a.expertise = DEFAULT_SKILLS;
+    });
+    let _ = QueuedMissionActorData::with_mut(|q| {
+        q.expertise = DEFAULT_SKILLS;
     });
 }
 
@@ -439,6 +450,13 @@ fn give_skill(skill_id: &usize) {
 
     let _ = CharacterData::with_mut(|c| {
         c.expertise[data.index].bitor_assign(data.flag);
+        c.queued_expertise[data.index].bitor_assign(data.flag);
+    });
+    let _ = ActiveMissionActorData::with_mut(|a| {
+        a.expertise[data.index].bitor_assign(data.flag);
+    });
+    let _ = QueuedMissionActorData::with_mut(|q| {
+        q.expertise[data.index].bitor_assign(data.flag);
     });
 }
 

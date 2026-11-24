@@ -74,7 +74,8 @@ static SKILLS_MAP: LazyLock<HashMap<&str, SkillData>> = LazyLock::new(|| {
             SkillData {
                 id: 0x44,
                 index: 1,
-                flag: 0x40,
+                // Buying it in the shop sets 0x80 (0x40 is on by default)
+                flag: 0x80,
             },
         ),
         (
@@ -90,7 +91,8 @@ static SKILLS_MAP: LazyLock<HashMap<&str, SkillData>> = LazyLock::new(|| {
             SkillData {
                 id: 0x46,
                 index: 1,
-                flag: 0x4000000,
+                // Buying Jet Stream in the shop first sets 0x8000000 (0x4000000 is on by default)
+                flag: 0x8000000,
             },
         ),
         (
@@ -98,7 +100,8 @@ static SKILLS_MAP: LazyLock<HashMap<&str, SkillData>> = LazyLock::new(|| {
             SkillData {
                 id: 0x47,
                 index: 1,
-                flag: 0x8000000,
+                // The next free Jet Stream flag; to be confirmed in game
+                flag: 0x10000000,
             },
         ),
         (

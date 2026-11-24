@@ -4,7 +4,6 @@ use crate::hooks::check_handler;
 use crate::hooks::check_handler::{Location, LocationType};
 use crate::mapping::MAPPING;
 use crate::ui::overlay::{CANT_PURCHASE, SHOW_GUN_LEVELS};
-use crate::data::game_structs::{GameData, SessionData};
 use crate::game_manager::ARCHIPELAGO_DATA;
 use crate::{AP_CORE, create_hook, skill_manager, tracker};
 use minhook::{MH_STATUS, MinHook};
@@ -132,9 +131,6 @@ pub fn skill_shop_constructor(custom_skill: usize) {
         unsafe {
             orig(custom_skill);
         }
-    }
-    if skill_checks && let Ok(flags) = SessionData::with_read(|s| s.expertise) {
-        skill_manager::find_shop_copy(flags);
     }
     if let Some(mapping) = MAPPING.read().unwrap().as_ref()
         && mapping.randomize_skills

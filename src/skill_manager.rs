@@ -624,13 +624,9 @@ pub(crate) fn take_bought_skills() -> Vec<&'static str> {
             current[i] |= c[i];
         }
     }
-    for (addr, copy) in read_copies() {
-        let new = newly_bought(&old, &copy);
-        if !new.is_empty() {
-            log::debug!("Copy at {:#X} has new skills {:?}", addr, new);
-        }
+    if let Some(m) = mission_expertise() {
         for i in 0..8 {
-            current[i] |= copy[i];
+            current[i] |= m[i];
         }
     }
     let bought = newly_bought(&old, &current);
@@ -643,9 +639,7 @@ pub(crate) fn take_bought_skills() -> Vec<&'static str> {
 
 /// Leaves the shop: stop showing purchase checks and put received skills back
 pub(crate) fn close_skill_shop(data: &ArchipelagoData) {
-    if let Ok(mut copies) = SHOP_COPIES.write() {
-        copies.clear();
-    }
+
     if let Ok(mut snap) = SHOP_SNAPSHOT.write() {
         *snap = None;
     }
@@ -659,70 +653,33 @@ pub(crate) fn log_expertise(when: &str) {
     let session = SessionData::with_read(|s| s.expertise).ok();
     let live = CharacterData::with_read(|c| c.expertise).ok();
     log::debug!(
-        "Skill flags {}: session {:X?}, live {:X?}, copies {:X?}",
-        when, session, live, read_copies()
+        "Skill flags {}: session {:X?}, live {:X?}, mission {:X?}",
+        when, session, live, mission_expertise()
     );
 }
 
-/// Copies of the skill flags found in game memory when the shop opened (not the session itself)
-static SHOP_COPIES: RwLock<Vec<usize>> = RwLock::new(Vec::new());
+/// Skill flags in the mission's active copy (where the shop seems to write purchases), if available
+fn mission_expertise() -> Option<[u32; 8]> {
+    crate::data::game_structs::ActiveMissionActorData::with_read(|a| a.expertise).ok()
+}
 
-/// Test build: searches all writable game memory for copies of `flags`
-pub(crate) fn find_shop_copy(flags: [u32; 8]) {
-    use windows::Win32::System::Memory::{
-        MEM_COMMIT, MEM_PRIVATE, MEMORY_BASIC_INFORMATION, PAGE_READWRITE, VirtualQuery,
+/// Test build: called every frame, logs whenever any skill flag copy changes
+pub(crate) fn watch_skill_flags() {
+    static LAST: RwLock<Option<(Option<[u32; 8]>, Option<[u32; 8]>, Option<[u32; 8]>)>> =
+        RwLock::new(None);
+    let now = (
+        SessionData::with_read(|s| s.expertise).ok(),
+        CharacterData::with_read(|c| c.expertise).ok(),
+        mission_expertise(),
+    );
+    let Ok(mut last) = LAST.write() else {
+        return;
     };
-    let session_addr = SessionData::with_read(|s| &s.expertise as *const _ as usize).unwrap_or(0);
-    let mut found: Vec<usize> = vec![];
-    let mut addr: usize = 0x10000;
-    let started = std::time::Instant::now();
-    while addr < 0x7FFF_FFFF_0000 && found.len() < 32 {
-        let mut info = MEMORY_BASIC_INFORMATION::default();
-        let size = unsafe {
-            VirtualQuery(Some(addr as *const _), &mut info, size_of::<MEMORY_BASIC_INFORMATION>())
-        };
-        if size == 0 {
-            break;
-        }
-        let base = info.BaseAddress as usize;
-        let region_end = base + info.RegionSize;
-        if info.State == MEM_COMMIT
-            && info.Type == MEM_PRIVATE
-            && info.Protect == PAGE_READWRITE
-            && info.RegionSize <= 0x1000_0000
-        {
-            let mut p = base;
-            while p + 32 <= region_end {
-                let first = unsafe { std::ptr::read(p as *const u32) };
-                if first == flags[0] {
-                    let words = unsafe { std::ptr::read_unaligned(p as *const [u32; 8]) };
-                    if words == flags && p != session_addr {
-                        found.push(p);
-                    }
-                }
-                p += 4;
-            }
-        }
-        addr = region_end.max(addr + 0x1000);
+    if *last != Some(now) {
+        log::debug!(
+            "Skill flags changed: session {:X?}, live {:X?}, mission {:X?}",
+            now.0, now.1, now.2
+        );
+        *last = Some(now);
     }
-    log::debug!(
-        "Skill flag copies in memory (session at {:#X}), searched in {:?}: {:X?}",
-        session_addr,
-        started.elapsed(),
-        found
-    );
-    if let Ok(mut copies) = SHOP_COPIES.write() {
-        *copies = found;
-    }
-}
-
-fn read_copies() -> Vec<(usize, [u32; 8])> {
-    SHOP_COPIES
-        .read()
-        .map(|c| {
-            c.iter()
-                .map(|&a| (a, unsafe { std::ptr::read_unaligned(a as *const [u32; 8]) }))
-                .collect()
-        })
-        .unwrap_or_default()
 }

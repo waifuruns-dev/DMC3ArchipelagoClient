@@ -548,7 +548,12 @@ pub fn handle_received_items_packet(
                         }
                         0x24..0x3A => {
                             // For key items
-                            if let Some(item_list) = MISSION_ITEM_MAP.get(&(get_mission()))
+                            // Only newly received key items. Replaying already-received ones put
+                            // used items (e.g. the inserted Stone Mask) back in the inventory, which
+                            // undid their effect (M10 bridge lowered again after SM6). Items you
+                            // already have are restored on room load by set_relevant_key_items.
+                            if item.index() >= CURRENT_INDEX.load(Ordering::SeqCst) as usize
+                                && let Some(item_list) = MISSION_ITEM_MAP.get(&(get_mission()))
                                 && item_list.contains(&&*item.item().name())
                             {
                                 log::debug!("Adding key item: {}", item.item().name());

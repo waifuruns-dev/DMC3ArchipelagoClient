@@ -355,7 +355,14 @@ pub fn purchase_item_check(ptr: usize) {
             let amt = read_data_from_address::<u8>(
                 read_data_from_address::<usize>(ptr + 0x4190) + 0xC + bought_item_id,
             );
-            log::debug!("Item {} Bought {}", bought_item_id, amt);
+            log::debug!(
+                "Item {} Bought {} (count at {:#X}, shop {:#X}, session data at {:#X})",
+                bought_item_id,
+                amt,
+                read_data_from_address::<usize>(ptr + 0x4190) + 0xC + bought_item_id,
+                ptr,
+                *DMC3_ADDRESS + 0xC8F250
+            );
             crate::hooks::save_handler::request_forced_save("bought an orb");
             // Now that we know what was bought and how many times. We need to send this off to AP
             send_off_location_coords(

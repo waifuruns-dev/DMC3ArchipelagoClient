@@ -132,6 +132,7 @@ pub fn skill_shop_constructor(custom_skill: usize) {
             orig(custom_skill);
         }
     }
+    skill_manager::log_skill_list_scan("shop opened", custom_skill);
     if let Some(mapping) = MAPPING.read().unwrap().as_ref()
         && mapping.randomize_skills
         && !mapping.shop_skill_checks
@@ -190,6 +191,7 @@ pub static ORIGINAL_SKILL_SHOP_DECONSTRUCTOR: OnceLock<unsafe extern "C" fn(cust
 
 pub fn skill_shop_deconstructor(custom_skill: usize) {
     log::info!("Skill shop deconstructor ({:#X})", custom_skill);
+    skill_manager::log_skill_list_scan("shop closing", custom_skill);
     if skill_manager::IN_SKILL_SHOP.load(Ordering::SeqCst) {
         send_bought_skills();
     }
@@ -224,6 +226,7 @@ pub fn skill_shop_purchase(custom_skill: usize) {
                 mode,
                 skill_manager::IN_SKILL_SHOP.load(Ordering::SeqCst)
             );
+            skill_manager::log_skill_list_scan(&format!("mode {:#X}", mode), custom_skill);
         }
         if skill_manager::IN_SKILL_SHOP.load(Ordering::SeqCst) {
             // Purchase checks: let the game sell the skill, then send its check

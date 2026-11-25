@@ -57,10 +57,28 @@ pub(crate) fn tick_forced_save() {
             _ => return,
         }
     };
-    let slot = CURRENT_SLOT.load(Ordering::SeqCst);
+    let mut slot = CURRENT_SLOT.load(Ordering::SeqCst);
     if slot < 0 {
-        log::warn!("Forced save skipped ({}): no save slot loaded yet", why);
-        return;
+        // A new seed has no save until you save once. If this seed has no save file at all,
+        // there's nothing to overwrite, so the first forced save makes slot 0.
+        match get_save_path() {
+            Ok(path) if !std::path::Path::new(&path).exists() => {
+                log::info!("No save for this seed yet: the forced save creates slot 0");
+                slot = 0;
+                CURRENT_SLOT.store(0, Ordering::SeqCst);
+            }
+            Ok(_) => {
+                log::warn!(
+                    "Forced save skipped ({}): this seed has saves but none was loaded",
+                    why
+                );
+                return;
+            }
+            Err(e) => {
+                log::warn!("Forced save skipped ({}): no save path ({})", why, e);
+                return;
+            }
+        }
     }
     if !CONNECTED.load(Ordering::SeqCst) {
         log::warn!("Forced save skipped ({}): not connected", why);

@@ -657,6 +657,38 @@ pub(crate) fn close_skill_shop(data: &ArchipelagoData) {
     log::debug!("Skill shop closed, received skills re-applied");
 }
 
+/// Test build: looks for skill lists (8 words whose 5th and 6th match the defaults, which never
+/// change) on the skill shop object and around the old global pointer, and logs where they are
+pub(crate) fn log_skill_list_scan(when: &str, shop: usize) {
+    let mut found = Vec::new();
+    let mut scan = |label: &str, start: usize, len: usize| {
+        let mut buf = vec![0u8; len + 32];
+        if start == 0 || !safe_read(start, &mut buf) {
+            found.push(format!("{} {:#X}: unreadable", label, start));
+            return;
+        }
+        let word = |i: usize| u32::from_le_bytes(buf[i..i + 4].try_into().unwrap());
+        let mut hits = 0;
+        let mut off = 0;
+        while off + 32 <= buf.len() && hits < 16 {
+            if word(off + 16) == DEFAULT_SKILLS[4] && word(off + 20) == DEFAULT_SKILLS[5] {
+                let words: Vec<u32> = (0..8).map(|k| word(off + k * 4)).collect();
+                found.push(format!("{}+{:#X} {:X?}", label, off, words));
+                hits += 1;
+                off += 32;
+            } else {
+                off += 4;
+            }
+        }
+    };
+    scan("shop", shop, 0x8000);
+    let mut ptr = [0u8; 8];
+    if safe_read(*crate::DMC3_ADDRESS + SHOP_COPY_POINTER, &mut ptr) {
+        scan("global", u64::from_le_bytes(ptr) as usize, 0x2000);
+    }
+    log::debug!("Skill list scan ({}): {}", when, found.join(" | "));
+}
+
 /// Research logging: the session, "next start" and "right now" skill lists
 pub(crate) fn describe_skill_lists() -> String {
     let session = SessionData::with_read(|s| s.expertise).ok();

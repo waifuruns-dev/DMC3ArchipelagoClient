@@ -25,6 +25,51 @@ pub static ORIGINAL_LOAD_GAME: OnceLock<
 
 static SAVE_DATA: RwLock<Vec<u8>> = RwLock::new(vec![]);
 
+pub fn get_save_path() -> Result<String, Box<dyn Error>> {
+    if let Ok(core) = AP_CORE.get().unwrap().as_ref().lock()
+        && let Some(client) = core.connection.client()
+    {
+        Ok(format!(
+            "{}{}",
+            randomizer_utilities::get_room_path(client)?,
+            "dmc3.sav"
+        ))
+    } else {
+        Err("Connecting unavailable".into())
+    }
+}
+
+pub fn setup_save_hooks() -> Result<(), MH_STATUS> {
+    log::debug!("Setting up save file related hooks");
+    unsafe {
+        create_hook!(
+            LOAD_GAME_ADDR,
+            load_ap_save_file,
+            ORIGINAL_LOAD_GAME,
+            "Load game"
+        );
+        create_hook!(
+            SAVE_GAME_ADDR,
+            save_ap_save_file,
+            ORIGINAL_SAVE_GAME,
+            "Save game"
+        );
+        create_hook!(
+            SAVE_SESSION_DATA,
+            save_to_slot,
+            ORIGINAL_SAVE_SLOT,
+            "Save slot"
+        );
+        create_hook!(
+            LOAD_SESSION_DATA,
+            load_slot,
+            ORIGINAL_LOAD_SLOT,
+            "Load slot"
+        );
+    }
+    Ok(())
+}
+
 /// Reimplementation of DMC3's save game method, but will save to a custom file instead
 fn save_ap_save_file(param_1: i32) {
     // param_1 has just been 0 so far

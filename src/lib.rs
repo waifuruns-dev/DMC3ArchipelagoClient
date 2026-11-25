@@ -15,6 +15,7 @@ mod compat;
 mod config;
 mod constants;
 mod data;
+mod enemizer;
 mod game_manager;
 mod hint_game;
 mod hooks;

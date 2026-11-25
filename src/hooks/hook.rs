@@ -114,6 +114,7 @@ pub(crate) unsafe fn create_hooks() -> Result<(), MH_STATUS> {
         text_handler::setup_text_hooks()?;
         save_handler::setup_save_hooks()?;
         store_hook::create_hooks()?;
+        crate::enemizer::create_hooks()?;
     }
     Ok(())
 }
@@ -152,6 +153,7 @@ static HOOK_ADDRESSES: LazyLock<Vec<usize>> = LazyLock::new(|| {
     ];
     let mut addrs = ADDRESSES.to_vec();
     addrs.extend(store_hook::HOOK_ADDRESSES.iter());
+    addrs.extend(crate::enemizer::HOOK_ADDRESSES.iter());
     addrs
 });
 

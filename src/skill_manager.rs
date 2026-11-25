@@ -769,7 +769,7 @@ pub(crate) fn poll_bought_skills() -> Vec<&'static str> {
 
 
 /// Reads game memory without risking a crash: an unreadable or freed address returns None
-fn safe_read(addr: usize, buf: &mut [u8]) -> bool {
+pub(crate) fn safe_read(addr: usize, buf: &mut [u8]) -> bool {
     use windows::Win32::System::Diagnostics::Debug::ReadProcessMemory;
     use windows::Win32::System::Threading::GetCurrentProcess;
     let mut read = 0usize;

@@ -214,6 +214,11 @@ pub struct Mapping {
     pub shop_gun_checks: bool,
     #[serde(default)]
     pub shop_skill_checks: bool,
+    /// Enemy randomizer: 0 off, 1 one replacement per enemy type per room, 2 every spawn
+    #[serde(default)]
+    pub enemy_randomizer: u8,
+    #[serde(default)]
+    pub enemizer_seed: u64,
     #[serde(deserialize_with = "parse_hint")]
     pub auto_orb_hints: AutoHint,
     #[serde(default)]

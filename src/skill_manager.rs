@@ -774,7 +774,10 @@ fn read_copy(addr: usize) -> Option<[u32; 8]> {
 // data, but their position on it moves (+0x9E4 in one session, +0x21E4 in another), so they're
 // found by searching the object for two skill lists 0xD0 apart.
 const SHOP_OBJECT_POINTER: usize = 0xC9DDB8;
-const SHOP_SEARCH_SIZE: usize = 0x10000;
+/// The menu shop's list has been at +0x9E4 to +0x41E4, the mid-mission statue's at +0x1CC54
+const SHOP_SEARCH_SIZE: usize = 0x40000;
+/// Read in pieces, so one unreadable page only ends the search there
+const SHOP_SEARCH_CHUNK: usize = 0x10000;
 const SHOP_RESULT_DISTANCE: usize = 0xD0;
 
 /// The last four words of a skill list never change (no purchasable skills in them)
@@ -792,24 +795,30 @@ fn find_shop_lists() -> Option<(usize, usize)> {
     if base == 0 {
         return None;
     }
-    let mut buf = vec![0u8; SHOP_SEARCH_SIZE + SHOP_RESULT_DISTANCE + 32];
-    if !safe_read(base, &mut buf) {
-        return None;
-    }
-    let words = |at: usize| -> [u32; 8] {
-        let mut w = [0u32; 8];
-        for (k, v) in w.iter_mut().enumerate() {
-            *v = u32::from_le_bytes(buf[at + k * 4..at + k * 4 + 4].try_into().unwrap());
+    let overlap = SHOP_RESULT_DISTANCE + 32;
+    let mut buf = vec![0u8; SHOP_SEARCH_CHUNK + overlap];
+    let mut start = 0;
+    while start < SHOP_SEARCH_SIZE {
+        if !safe_read(base + start, &mut buf) {
+            return None;
         }
-        w
-    };
-    (0..SHOP_SEARCH_SIZE)
-        .step_by(4)
-        .find(|&off| {
+        let words = |at: usize| -> [u32; 8] {
+            let mut w = [0u32; 8];
+            for (k, v) in w.iter_mut().enumerate() {
+                *v = u32::from_le_bytes(buf[at + k * 4..at + k * 4 + 4].try_into().unwrap());
+            }
+            w
+        };
+        if let Some(off) = (0..SHOP_SEARCH_CHUNK).step_by(4).find(|&off| {
             looks_like_skill_list(words(off))
                 && looks_like_skill_list(words(off + SHOP_RESULT_DISTANCE))
-        })
-        .map(|off| (base + off, base + off + SHOP_RESULT_DISTANCE))
+        }) {
+            let list = base + start + off;
+            return Some((list, list + SHOP_RESULT_DISTANCE));
+        }
+        start += SHOP_SEARCH_CHUNK;
+    }
+    None
 }
 
 fn write_list(addr: usize, flags: [u32; 8]) {

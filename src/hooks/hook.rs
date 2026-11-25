@@ -387,7 +387,7 @@ fn item_spawns_hook(unknown: usize) {
                     // modify_secret_mission_item(mapping);
                     for _i in 0..item_count {
                         let item_ref: &u32 = &*(item_addr as *const u32);
-                        const EXTRA_OUTPUT: bool = true; // Test build: log every item spawn
+                        const EXTRA_OUTPUT: bool = false;
                         if EXTRA_OUTPUT {
                             log::debug!("Item ID: {} ({:#X})", get_item_name(*item_ref), *item_ref);
                         }

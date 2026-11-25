@@ -100,7 +100,7 @@ static SKILLS_MAP: LazyLock<HashMap<&str, SkillData>> = LazyLock::new(|| {
             SkillData {
                 id: 0x47,
                 index: 1,
-                // The next free Jet Stream flag; to be confirmed in game
+                // The next free Jet Stream flag (confirmed in game)
                 flag: 0x10000000,
             },
         ),
@@ -657,40 +657,9 @@ pub(crate) fn close_skill_shop(data: &ArchipelagoData) {
     log::debug!("Skill shop closed, received skills re-applied");
 }
 
-/// Test build: log the session and live skill flags
-pub(crate) fn log_expertise(when: &str) {
-    let session = SessionData::with_read(|s| s.expertise).ok();
-    let live = CharacterData::with_read(|c| c.expertise).ok();
-    log::debug!(
-        "Skill flags {}: session {:X?}, live {:X?}, mission {:X?}",
-        when, session, live, mission_expertise()
-    );
-}
-
 /// Skill flags in the mission's active copy (where the shop seems to write purchases), if available
 fn mission_expertise() -> Option<[u32; 8]> {
     crate::data::game_structs::ActiveMissionActorData::with_read(|a| a.expertise).ok()
-}
-
-/// Test build: called every frame, logs whenever any skill flag copy changes
-pub(crate) fn watch_skill_flags() {
-    static LAST: RwLock<Option<(Option<[u32; 8]>, Option<[u32; 8]>, Option<[u32; 8]>)>> =
-        RwLock::new(None);
-    let now = (
-        SessionData::with_read(|s| s.expertise).ok(),
-        CharacterData::with_read(|c| c.expertise).ok(),
-        mission_expertise(),
-    );
-    let Ok(mut last) = LAST.write() else {
-        return;
-    };
-    if *last != Some(now) {
-        log::debug!(
-            "Skill flags changed: session {:X?}, live {:X?}, mission {:X?}",
-            now.0, now.1, now.2
-        );
-        *last = Some(now);
-    }
 }
 
 /// After the shop closes the game writes bought skills into the mission copy about a second
@@ -796,9 +765,7 @@ pub(crate) fn poll_bought_skills() -> Vec<&'static str> {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Test build only: finds where the shop keeps the skill list it shows. Read-only: it searches
-// game memory for skill lists and logs where they are and when they change. Nothing here is
-// used to send checks or written back to the game.
+// Reading the shop's own copy of the skill list
 
 
 /// Reads game memory without risking a crash: an unreadable or freed address returns None

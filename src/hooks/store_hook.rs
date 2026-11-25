@@ -191,7 +191,6 @@ pub static ORIGINAL_SKILL_SHOP_DECONSTRUCTOR: OnceLock<unsafe extern "C" fn(cust
 pub fn skill_shop_deconstructor(custom_skill: usize) {
     log::info!("Skill shop deconstructor ({:#X})", custom_skill);
     if skill_manager::IN_SKILL_SHOP.load(Ordering::SeqCst) {
-        skill_manager::log_expertise("before shop close");
         send_bought_skills();
     }
     if let Some(orig) = ORIGINAL_SKILL_SHOP_DECONSTRUCTOR.get() {
@@ -201,7 +200,6 @@ pub fn skill_shop_deconstructor(custom_skill: usize) {
     }
     // The shop may only write bought skills into the session when it closes
     if skill_manager::IN_SKILL_SHOP.load(Ordering::SeqCst) {
-        skill_manager::log_expertise("after shop close");
         send_bought_skills();
     }
     CANT_PURCHASE.store(false, Ordering::SeqCst);
@@ -225,9 +223,6 @@ pub fn skill_shop_purchase(custom_skill: usize) {
                 mode,
                 skill_manager::IN_SKILL_SHOP.load(Ordering::SeqCst)
             );
-            if skill_manager::IN_SKILL_SHOP.load(Ordering::SeqCst) {
-                skill_manager::log_expertise("shop mode change");
-            }
         }
         if skill_manager::IN_SKILL_SHOP.load(Ordering::SeqCst) {
             // Purchase checks: let the game sell the skill, then send its check

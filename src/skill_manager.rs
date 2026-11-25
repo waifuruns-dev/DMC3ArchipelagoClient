@@ -704,6 +704,64 @@ pub(crate) fn log_skill_list_scan(when: &str, shop: usize) {
     log::debug!("Skill list scan ({}): {}", when, found.join(" | "));
 }
 
+/// Test build: searches all readable game memory for skill lists (5th-8th words match the
+/// defaults, which purchases never touch). Read-only and crash-safe; slow, so only on shop open
+/// and close.
+pub(crate) fn log_full_skill_list_scan(when: &str) {
+    use windows::Win32::System::Memory::{
+        MEM_COMMIT, MEMORY_BASIC_INFORMATION, PAGE_GUARD, PAGE_NOACCESS, VirtualQuery,
+    };
+    let started = std::time::Instant::now();
+    let mut hits = Vec::new();
+    let mut addr = 0x10000usize;
+    let mut buf = Vec::new();
+    while addr < 0x7FFF_FFFF_0000 && hits.len() < 40 {
+        let mut info = MEMORY_BASIC_INFORMATION::default();
+        if unsafe {
+            VirtualQuery(
+                Some(addr as *const _),
+                &mut info,
+                std::mem::size_of::<MEMORY_BASIC_INFORMATION>(),
+            )
+        } == 0
+        {
+            break;
+        }
+        let base = info.BaseAddress as usize;
+        let size = info.RegionSize;
+        let readable = info.State == MEM_COMMIT
+            && (info.Protect.0 & (PAGE_NOACCESS.0 | PAGE_GUARD.0)) == 0
+            && size <= 0x4000_0000;
+        if readable {
+            buf.resize(size, 0);
+            if safe_read(base, &mut buf) {
+                let mut off = 0;
+                while off + 32 <= size {
+                    let w = |k: usize| u32::from_le_bytes(buf[off + k * 4..off + k * 4 + 4].try_into().unwrap());
+                    if w(4) == DEFAULT_SKILLS[4]
+                        && w(5) == DEFAULT_SKILLS[5]
+                        && w(6) == DEFAULT_SKILLS[6]
+                        && w(7) == DEFAULT_SKILLS[7]
+                    {
+                        let words: Vec<u32> = (0..8).map(w).collect();
+                        hits.push(format!("{:#X} {:X?}", base + off, words));
+                        off += 32;
+                        continue;
+                    }
+                    off += 4;
+                }
+            }
+        }
+        addr = base + size.max(0x1000);
+    }
+    log::debug!(
+        "Full skill list scan ({}, {} ms): {}",
+        when,
+        started.elapsed().as_millis(),
+        hits.join(" | ")
+    );
+}
+
 /// Research logging: the session, "next start" and "right now" skill lists
 pub(crate) fn describe_skill_lists() -> String {
     let session = SessionData::with_read(|s| s.expertise).ok();

@@ -133,6 +133,7 @@ pub fn skill_shop_constructor(custom_skill: usize) {
         }
     }
     skill_manager::log_skill_list_scan("shop opened", custom_skill);
+    skill_manager::log_full_skill_list_scan("shop opened");
     if let Some(mapping) = MAPPING.read().unwrap().as_ref()
         && mapping.randomize_skills
         && !mapping.shop_skill_checks
@@ -192,6 +193,7 @@ pub static ORIGINAL_SKILL_SHOP_DECONSTRUCTOR: OnceLock<unsafe extern "C" fn(cust
 pub fn skill_shop_deconstructor(custom_skill: usize) {
     log::info!("Skill shop deconstructor ({:#X})", custom_skill);
     skill_manager::log_skill_list_scan("shop closing", custom_skill);
+    skill_manager::log_full_skill_list_scan("shop closing");
     if skill_manager::IN_SKILL_SHOP.load(Ordering::SeqCst) {
         send_bought_skills();
     }

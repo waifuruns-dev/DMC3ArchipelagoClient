@@ -363,7 +363,6 @@ pub fn purchase_item_check(ptr: usize) {
                 ptr,
                 *DMC3_ADDRESS + 0xC8F250
             );
-            crate::hooks::save_handler::request_forced_save("bought an orb");
             // Now that we know what was bought and how many times. We need to send this off to AP
             send_off_location_coords(
                 Location {

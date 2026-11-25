@@ -664,7 +664,9 @@ pub(crate) fn log_skill_list_scan(when: &str, shop: usize) {
     let mut scan = |label: &str, start: usize, len: usize| {
         let mut buf = vec![0u8; len + 32];
         if start == 0 || !safe_read(start, &mut buf) {
-            found.push(format!("{} {:#X}: unreadable", label, start));
+            if !label.contains("->") {
+                found.push(format!("{} {:#X}: unreadable", label, start));
+            }
             return;
         }
         let word = |i: usize| u32::from_le_bytes(buf[i..i + 4].try_into().unwrap());
@@ -682,6 +684,19 @@ pub(crate) fn log_skill_list_scan(when: &str, shop: usize) {
         }
     };
     scan("shop", shop, 0x8000);
+    // One step further: every pointer on the shop's data
+    let mut obj = vec![0u8; 0x1000];
+    if safe_read(shop, &mut obj) {
+        let mut seen = Vec::new();
+        for off in (0..obj.len()).step_by(8) {
+            let p = u64::from_le_bytes(obj[off..off + 8].try_into().unwrap()) as usize;
+            if p < 0x10000 || p > 0x7FFF_FFFF_FFFF || p % 4 != 0 || seen.contains(&p) {
+                continue;
+            }
+            seen.push(p);
+            scan(&format!("shop+{:#X}->{:#X}", off, p), p, 0x2000);
+        }
+    }
     let mut ptr = [0u8; 8];
     if safe_read(*crate::DMC3_ADDRESS + SHOP_COPY_POINTER, &mut ptr) {
         scan("global", u64::from_le_bytes(ptr) as usize, 0x2000);

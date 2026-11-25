@@ -208,7 +208,6 @@ pub fn skill_shop_deconstructor(custom_skill: usize) {
     if skill_manager::IN_SKILL_SHOP.load(Ordering::SeqCst) {
         skill_manager::close_skill_shop(&ARCHIPELAGO_DATA.read().unwrap());
     }
-    crate::hooks::save_handler::request_forced_save("left the skill shop");
 }
 
 pub const PURCHASE_SKILL_SHOP_ADDR: usize = 0x288f80;
@@ -325,7 +324,6 @@ pub static ORIGINAL_GUN_SHOP_EXIT: OnceLock<unsafe extern "C" fn(custom_gun: usi
 
 pub fn exit_gun_upgrade_screen(custom_gun: usize) -> bool {
     CANT_PURCHASE.store(false, Ordering::SeqCst);
-    crate::hooks::save_handler::request_forced_save("left the gun shop");
     SHOW_GUN_LEVELS.store(false, Ordering::SeqCst);
 
     if let Some(mapping) = MAPPING.read().unwrap().as_ref()

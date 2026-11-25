@@ -611,9 +611,10 @@ pub(crate) fn open_skill_shop(checks: [u32; 8]) {
             shop.backup,
             checks
         ),
-        None => log::warn!(
-            "Skill shop: couldn't find the shop's skill list; purchases won't be checks"
-        ),
+        None => {
+            log::warn!("Skill shop: couldn't find the shop's skill list; purchases won't be checks");
+            log_skill_lists_everywhere();
+        }
     }
     if let Ok(mut open) = OPEN_SHOP.write() {
         *open = opened;
@@ -650,6 +651,69 @@ pub(crate) fn take_new_purchases() -> Vec<&'static str> {
         log::debug!("Skill shop: bought {:?}", bought);
     }
     bought
+}
+
+/// When the shop's list isn't found: log every skill list in game memory once per session, so we
+/// can see where this shop keeps it (read-only and crash-safe, but takes a second or two)
+fn log_skill_lists_everywhere() {
+    use windows::Win32::System::Memory::{
+        MEM_COMMIT, MEMORY_BASIC_INFORMATION, PAGE_GUARD, PAGE_NOACCESS, VirtualQuery,
+    };
+    static DONE: AtomicBool = AtomicBool::new(false);
+    if DONE.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let mut ptr = [0u8; 8];
+    let object = if safe_read(*crate::DMC3_ADDRESS + SHOP_OBJECT_POINTER, &mut ptr) {
+        u64::from_le_bytes(ptr) as usize
+    } else {
+        0
+    };
+    let mut hits = Vec::new();
+    let mut addr = 0x10000usize;
+    let mut buf = Vec::new();
+    while addr < 0x7FFF_FFFF_0000 && hits.len() < 40 {
+        let mut info = MEMORY_BASIC_INFORMATION::default();
+        if unsafe {
+            VirtualQuery(
+                Some(addr as *const _),
+                &mut info,
+                std::mem::size_of::<MEMORY_BASIC_INFORMATION>(),
+            )
+        } == 0
+        {
+            break;
+        }
+        let base = info.BaseAddress as usize;
+        let size = info.RegionSize;
+        if info.State == MEM_COMMIT
+            && (info.Protect.0 & (PAGE_NOACCESS.0 | PAGE_GUARD.0)) == 0
+            && size <= 0x4000_0000
+        {
+            buf.resize(size, 0);
+            if safe_read(base, &mut buf) {
+                let mut off = 0;
+                while off + 32 <= size {
+                    let mut w = [0u32; 8];
+                    for (k, v) in w.iter_mut().enumerate() {
+                        *v = u32::from_le_bytes(buf[off + k * 4..off + k * 4 + 4].try_into().unwrap());
+                    }
+                    if looks_like_skill_list(w) {
+                        hits.push(format!("{:#X} {:X?}", base + off, &w[..4]));
+                        off += 32;
+                    } else {
+                        off += 4;
+                    }
+                }
+            }
+        }
+        addr = base + size.max(0x1000);
+    }
+    log::debug!(
+        "Skill shop object pointer {:#X}; skill lists in memory: {}",
+        object,
+        hits.join(" | ")
+    );
 }
 
 /// Every purchase flag in one word of the list (for the unknown flag warning)
@@ -710,7 +774,7 @@ fn read_copy(addr: usize) -> Option<[u32; 8]> {
 // data, but their position on it moves (+0x9E4 in one session, +0x21E4 in another), so they're
 // found by searching the object for two skill lists 0xD0 apart.
 const SHOP_OBJECT_POINTER: usize = 0xC9DDB8;
-const SHOP_SEARCH_SIZE: usize = 0x4000;
+const SHOP_SEARCH_SIZE: usize = 0x10000;
 const SHOP_RESULT_DISTANCE: usize = 0xD0;
 
 /// The last four words of a skill list never change (no purchasable skills in them)

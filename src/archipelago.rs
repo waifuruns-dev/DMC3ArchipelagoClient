@@ -112,6 +112,10 @@ impl ArchipelagoCore {
                             overlay_info.client_version = mapping.client_version;
                             overlay_info.mode = ModMode::Normal;
                             MAPPING.write()?.replace(mapping.clone());
+                            if mapping.enemy_randomizer != 0 {
+                                // Read every enemy's files in the background for the enemizer
+                                crate::enemy_files::start_loading();
+                            }
                             self.received_items_queue.clear();
                             item_sync::send_offline_checks(self.connection.client_mut().unwrap())?;
                             if !self.hooks_installed {

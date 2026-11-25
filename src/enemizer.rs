@@ -11,8 +11,10 @@
 //! changes between loads, so the same seed always gives the same enemies, reloads included.
 //!
 //! An enemy can only spawn if its model files are loaded, and normally only the mission's own
-//! enemies are. This first version only picks replacements whose file set the game already has
-//! loaded (read from the game's enemy file list), so it never spawns something that isn't loaded.
+//! enemies are. `enemy_files` loads every enemy's files once (ported from Crimson) and swaps them
+//! in while a randomized enemy spawns, so any pool enemy can go anywhere. Until those are ready
+//! (they load in the background after connecting), only enemies whose files the game already has
+//! loaded are picked.
 //!
 //! Enemy ids, file sets, the spawn function and the file list all come from DMC3 Crimson
 //! (berthrage/DMC3-Crimson, zlib license), including its notes on which enemies break when
@@ -20,6 +22,7 @@
 
 use crate::create_hook;
 use crate::data::game_structs::{GameData, SessionData};
+use crate::enemy_files;
 use crate::mapping::MAPPING;
 use crate::utilities::DMC3_ADDRESS;
 use minhook::{MH_STATUS, MinHook};
@@ -33,10 +36,6 @@ pub static ORIGINAL_SPAWN_ENEMY: OnceLock<unsafe extern "C" fn(this: usize, data
 const MODE_OFF: u8 = 0;
 const MODE_PER_TYPE: u8 = 1;
 const MODE_MIXED: u8 = 2;
-
-/// Pointer to the game's list of loaded enemy file sets: [[dmc3+C90E10] + 0xA80 + 0x628]
-const FILE_POOL_PTR: usize = 0xC90E10;
-const FILE_LIST_OFFSET: usize = 0xA80 + 0x628;
 
 /// Enemy ids (Crimson's ENEMY enum) that can be swapped in and out, with the file sets they use.
 /// The Seven Hells all share em000, which the game may list under several file set numbers.
@@ -129,10 +128,11 @@ extern "C" fn spawn_enemy_hook(this: usize, data: usize) -> usize {
         if state.mission != mission || state.room != room {
             *state = RoomState { mission, room, spawns: 0 };
             log::debug!(
-                "Enemizer: room M{} R{}, loaded enemy file sets {:?}",
+                "Enemizer: room M{} R{}, game's loaded enemy file sets {:?}, all enemy files ready: {}",
                 mission,
                 room,
-                loaded_file_sets()
+                enemy_files::loaded_file_sets(),
+                enemy_files::ready()
             );
         }
         state.spawns += 1;
@@ -154,7 +154,7 @@ extern "C" fn spawn_enemy_hook(this: usize, data: usize) -> usize {
         position[2]
     );
 
-    let Some(new_enemy) = pick_replacement(enemy, mission, room, position) else {
+    let Some((new_enemy, use_all_files)) = pick_replacement(enemy, mission, room, position) else {
         return unsafe { orig(this, data) };
     };
     log::debug!(
@@ -167,7 +167,11 @@ extern "C" fn spawn_enemy_hook(this: usize, data: usize) -> usize {
     );
     unsafe {
         enemy_ptr.write_unaligned(new_enemy);
-        let res = orig(this, data);
+        let res = if use_all_files {
+            enemy_files::with_all_enemy_files(|| orig(this, data))
+        } else {
+            orig(this, data)
+        };
         // Put the room's own spawn data back the way it was
         enemy_ptr.write_unaligned(enemy);
         if res == 0 {
@@ -177,8 +181,9 @@ extern "C" fn spawn_enemy_hook(this: usize, data: usize) -> usize {
     }
 }
 
-/// Picks the replacement for a spawn, or None to leave it as it is
-fn pick_replacement(enemy: u32, mission: u32, room: i32, position: [f32; 4]) -> Option<u32> {
+/// Picks the replacement for a spawn, or None to leave it as it is. The bool says whether it needs
+/// our full set of enemy files swapped in.
+fn pick_replacement(enemy: u32, mission: u32, room: i32, position: [f32; 4]) -> Option<(u32, bool)> {
     let (mode, seed) = {
         let mapping = MAPPING.read().ok()?;
         let mapping = mapping.as_ref()?;
@@ -189,12 +194,18 @@ fn pick_replacement(enemy: u32, mission: u32, room: i32, position: [f32; 4]) -> 
     }
     pool_enemy(enemy)?;
 
-    let loaded = loaded_file_sets()?;
-    let choices: Vec<u32> = POOL
-        .iter()
-        .filter(|e| e.file_sets.iter().any(|set| loaded.contains(set)))
-        .map(|e| e.id)
-        .collect();
+    enemy_files::start_loading();
+    let all_files = enemy_files::ready();
+    let choices: Vec<u32> = if all_files {
+        POOL.iter().map(|e| e.id).collect()
+    } else {
+        // Not ready yet: only enemies whose files the game itself has loaded
+        let loaded = enemy_files::loaded_file_sets()?;
+        POOL.iter()
+            .filter(|e| e.file_sets.iter().any(|set| loaded.contains(set)))
+            .map(|e| e.id)
+            .collect()
+    };
     if choices.len() < 2 {
         return None;
     }
@@ -212,7 +223,7 @@ fn pick_replacement(enemy: u32, mission: u32, room: i32, position: [f32; 4]) -> 
         _ => return None,
     };
     let hash = mix(seed ^ mix((mission as u64) << 48 ^ (room as u32 as u64) << 32 ^ key));
-    Some(choices[(hash % choices.len() as u64) as usize])
+    Some((choices[(hash % choices.len() as u64) as usize], all_files))
 }
 
 /// splitmix64 finalizer
@@ -221,38 +232,6 @@ fn mix(mut x: u64) -> u64 {
     x = (x ^ (x >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
     x = (x ^ (x >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
     x ^ (x >> 31)
-}
-
-/// File set numbers in the game's loaded enemy file list (None if it can't be read)
-fn loaded_file_sets() -> Option<Vec<u32>> {
-    let pool = read_usize(*DMC3_ADDRESS + FILE_POOL_PTR)?;
-    if pool == 0 {
-        return None;
-    }
-    let mut node = read_usize(pool + FILE_LIST_OFFSET)?;
-    let mut sets = Vec::new();
-    // FileDataMetadata: next at +0x10, category at +0x24, file set at +0x28
-    for _ in 0..64 {
-        if node == 0 {
-            break;
-        }
-        let set = read_u32(node + 0x28)?;
-        if !sets.contains(&set) {
-            sets.push(set);
-        }
-        node = read_usize(node + 0x10)?;
-    }
-    Some(sets)
-}
-
-fn read_usize(addr: usize) -> Option<usize> {
-    let mut buf = [0u8; 8];
-    crate::skill_manager::safe_read(addr, &mut buf).then(|| usize::from_le_bytes(buf))
-}
-
-fn read_u32(addr: usize) -> Option<u32> {
-    let mut buf = [0u8; 4];
-    crate::skill_manager::safe_read(addr, &mut buf).then(|| u32::from_le_bytes(buf))
 }
 
 /// For the hook list (enable/disable with the other hooks)

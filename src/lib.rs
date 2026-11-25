@@ -16,6 +16,7 @@ mod config;
 mod constants;
 mod data;
 mod enemizer;
+mod enemy_files;
 mod game_manager;
 mod hint_game;
 mod hooks;

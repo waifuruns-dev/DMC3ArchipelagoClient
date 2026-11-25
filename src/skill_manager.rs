@@ -657,6 +657,18 @@ pub(crate) fn close_skill_shop(data: &ArchipelagoData) {
     log::debug!("Skill shop closed, received skills re-applied");
 }
 
+/// Research logging: the session, "next start" and "right now" skill lists
+pub(crate) fn describe_skill_lists() -> String {
+    let session = SessionData::with_read(|s| s.expertise).ok();
+    let queued = crate::data::game_structs::QueuedMissionActorData::with_read(|q| q.expertise).ok();
+    format!(
+        "session {:X?}, next start {:X?}, right now {:X?}",
+        session,
+        queued,
+        mission_expertise()
+    )
+}
+
 /// Skill flags in the mission's active copy (where the shop seems to write purchases), if available
 fn mission_expertise() -> Option<[u32; 8]> {
     crate::data::game_structs::ActiveMissionActorData::with_read(|a| a.expertise).ok()

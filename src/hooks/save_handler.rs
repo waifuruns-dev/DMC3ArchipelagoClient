@@ -73,8 +73,13 @@ pub fn setup_save_hooks() -> Result<(), MH_STATUS> {
 /// Reimplementation of DMC3's save game method, but will save to a custom file instead
 fn save_ap_save_file(param_1: i32) {
     // param_1 has just been 0 so far
-    log::debug!("Saving game (1) Param_1: {}", param_1);
     let base = *DMC3_ADDRESS;
+    log::debug!(
+        "Saving game (1) Param_1: {}, dirty flag {}, skill lists {}",
+        param_1,
+        unsafe { utilities::read_data_from_address::<u8>(base + 0x5EAE81) },
+        crate::skill_manager::describe_skill_lists()
+    );
     unsafe {
         if param_1 == 0 && (utilities::read_data_from_address::<u8>(base + 0x5EAE81) != 0) {
             let save_file_ptr = (base + SAVE_FILE_PTR) as *const usize;
@@ -137,6 +142,11 @@ fn load_ap_save_file(param_1: i64, param_2: i64, save_data_ptr: *mut usize, leng
     }
 }
 
+/// Where the game's save file buffer is (research logging)
+fn save_file_addr() -> usize {
+    unsafe { ((*DMC3_ADDRESS + SAVE_FILE_PTR) as *const usize).read() }
+}
+
 /// Get the save data to store in the SAVE_DATA global
 fn get_save_data() -> Result<(), Box<dyn Error>> {
     *SAVE_DATA.write()? = fs::read(get_save_path()?)?;
@@ -146,6 +156,14 @@ fn get_save_data() -> Result<(), Box<dyn Error>> {
 pub const LOAD_SESSION_DATA: usize = 0x3297E0;
 pub static ORIGINAL_LOAD_SLOT: OnceLock<unsafe extern "C" fn(usize, i32)> = OnceLock::new();
 fn load_slot(param_1: usize, save_index: i32) {
+    // Research for forced saves: what the game passes when loading a slot
+    log::debug!(
+        "Load slot call: param_1 {:#X}, slot {}, save file at {:#X}, skill lists {}",
+        param_1,
+        save_index,
+        save_file_addr(),
+        crate::skill_manager::describe_skill_lists()
+    );
     if let Some(orig) = ORIGINAL_LOAD_SLOT.get() {
         unsafe {
             orig(param_1, save_index);
@@ -184,11 +202,25 @@ fn load_slot(param_1: usize, save_index: i32) {
 pub const SAVE_SESSION_DATA: usize = 0x32B080;
 pub static ORIGINAL_SAVE_SLOT: OnceLock<unsafe extern "C" fn(usize, i32)> = OnceLock::new();
 fn save_to_slot(param_1: usize, save_index: i32) {
+    // Research for forced saves: what the game passes when saving, and the skill lists around it
+    log::debug!(
+        "Save slot call: param_1 {:#X}, slot {}, save file at {:#X}, dirty flag {}, before: {}",
+        param_1,
+        save_index,
+        save_file_addr(),
+        unsafe { utilities::read_data_from_address::<u8>(*DMC3_ADDRESS + 0x5EAE81) },
+        crate::skill_manager::describe_skill_lists()
+    );
     if let Some(orig) = ORIGINAL_SAVE_SLOT.get() {
         unsafe {
             orig(param_1, save_index);
         }
     }
+    log::debug!(
+        "Save slot call done: dirty flag {}, after: {}",
+        unsafe { utilities::read_data_from_address::<u8>(*DMC3_ADDRESS + 0x5EAE81) },
+        crate::skill_manager::describe_skill_lists()
+    );
     log::debug!("Saving to slot {}", save_index);
     match AP_CORE.get().unwrap().lock() {
         Ok(core) => {

@@ -634,6 +634,8 @@ pub static ORIGINAL_LOAD_NEW_ROOM: OnceLock<unsafe extern "C" fn(param_1: usize)
 
 pub fn load_new_room(param_1: usize) -> bool {
     let mut res = false;
+    // Restart the enemizer's spawn numbering for every room load (including reloads)
+    crate::enemizer::reset_room();
     unsafe {
         if let Some(original) = ORIGINAL_LOAD_NEW_ROOM.get() {
             res = original(param_1);

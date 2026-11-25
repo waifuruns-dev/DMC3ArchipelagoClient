@@ -6,9 +6,9 @@
 //! back so the room's own spawn data is never changed.
 //!
 //! Choices are seeded: the apworld sends `enemizer_seed`, and each pick is a hash of that seed plus
-//! the mission, room and either the original enemy (one replacement per enemy type per room) or
-//! the spawn's number in the room (every spawn picked separately). The same seed always gives the
-//! same enemies.
+//! the mission, room and original enemy (one replacement per enemy type per room), plus the spawn's
+//! position from the room's spawn data in mixed mode (every spawn picked separately). None of that
+//! changes between loads, so the same seed always gives the same enemies, reloads included.
 //!
 //! An enemy can only spawn if its model files are loaded, and normally only the mission's own
 //! enemies are. This first version only picks replacements whose file set the game already has
@@ -92,6 +92,12 @@ struct RoomState {
 }
 static ROOM_STATE: Mutex<RoomState> = Mutex::new(RoomState { mission: 0, room: -1, spawns: 0 });
 
+/// Called when a room loads (including reloading the same room): restarts the spawn numbering
+pub(crate) fn reset_room() {
+    let mut state = ROOM_STATE.lock().unwrap_or_else(|e| e.into_inner());
+    *state = RoomState { mission: 0, room: -1, spawns: 0 };
+}
+
 pub(crate) unsafe fn create_hooks() -> Result<(), MH_STATUS> {
     unsafe {
         create_hook!(
@@ -115,6 +121,7 @@ extern "C" fn spawn_enemy_hook(this: usize, data: usize) -> usize {
     let enemy = unsafe { enemy_ptr.read_unaligned() };
     let variant = unsafe { ((data + 0x28) as *const u32).read_unaligned() };
     let spawn_method = unsafe { ((data + 0x22) as *const u16).read_unaligned() };
+    let position = unsafe { ((data + 0x10) as *const [f32; 4]).read_unaligned() };
 
     let (mission, room) = SessionData::with_read(|s| (s.mission, s.room)).unwrap_or((0, -1));
     let spawn_number = {
@@ -134,17 +141,20 @@ extern "C" fn spawn_enemy_hook(this: usize, data: usize) -> usize {
 
     // Research logging: every spawn, so we can map each room's enemies
     log::debug!(
-        "Enemy spawn: M{} R{} #{} enemy {} ({}) variant {} method {}",
+        "Enemy spawn: M{} R{} #{} enemy {} ({}) variant {} method {} at ({:.0}, {:.0}, {:.0})",
         mission,
         room,
         spawn_number,
         enemy,
         pool_enemy(enemy).map_or("not randomized", |e| e.name),
         variant,
-        spawn_method
+        spawn_method,
+        position[0],
+        position[1],
+        position[2]
     );
 
-    let Some(new_enemy) = pick_replacement(enemy, mission, room, spawn_number) else {
+    let Some(new_enemy) = pick_replacement(enemy, mission, room, position) else {
         return unsafe { orig(this, data) };
     };
     log::debug!(
@@ -168,7 +178,7 @@ extern "C" fn spawn_enemy_hook(this: usize, data: usize) -> usize {
 }
 
 /// Picks the replacement for a spawn, or None to leave it as it is
-fn pick_replacement(enemy: u32, mission: u32, room: i32, spawn_number: u32) -> Option<u32> {
+fn pick_replacement(enemy: u32, mission: u32, room: i32, position: [f32; 4]) -> Option<u32> {
     let (mode, seed) = {
         let mapping = MAPPING.read().ok()?;
         let mapping = mapping.as_ref()?;
@@ -191,7 +201,14 @@ fn pick_replacement(enemy: u32, mission: u32, room: i32, spawn_number: u32) -> O
 
     let key = match mode {
         MODE_PER_TYPE => enemy as u64,
-        MODE_MIXED => 0x1_0000_0000 | spawn_number as u64,
+        // The spawn point from the room's spawn data, rounded to 10 units so float noise can't
+        // change the pick. Two spawns of the same enemy at the same spot get the same pick.
+        MODE_MIXED => {
+            let x = (position[0] / 10.0).round() as i32 as u32 as u64;
+            let y = (position[1] / 10.0).round() as i32 as u32 as u64;
+            let z = (position[2] / 10.0).round() as i32 as u32 as u64;
+            mix(enemy as u64 ^ mix(x ^ mix(y ^ mix(z ^ 0x1_0000_0000))))
+        }
         _ => return None,
     };
     let hash = mix(seed ^ mix((mission as u64) << 48 ^ (room as u32 as u64) << 32 ^ key));

@@ -9,8 +9,8 @@ use randomizer_utilities::item_sync::CURRENT_INDEX;
 use std::error::Error;
 use std::io::ErrorKind;
 use std::ptr::{write, write_unaligned};
-use std::sync::atomic::Ordering;
-use std::sync::{OnceLock, RwLock};
+use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::{Mutex, OnceLock, RwLock};
 use std::{fs, io};
 
 /// Pointer to where save file is in memory
@@ -24,6 +24,53 @@ pub static ORIGINAL_LOAD_GAME: OnceLock<
 > = OnceLock::new();
 
 static SAVE_DATA: RwLock<Vec<u8>> = RwLock::new(vec![]);
+
+/// What the game passes to its "save to slot" function (seen when saving at a Divinity Statue:
+/// always dmc3.exe+CF3310)
+const SAVE_SLOT_DATA: usize = 0xCF3310;
+/// Save slot last loaded or saved to (-1 until one is)
+static CURRENT_SLOT: AtomicI32 = AtomicI32::new(-1);
+/// When a forced save is due (set when leaving a shop, done a moment later from the main loop)
+static FORCED_SAVE_AT: Mutex<Option<(std::time::Instant, &'static str)>> = Mutex::new(None);
+/// Delay so the game finishes writing what was bought before we save
+const FORCED_SAVE_DELAY: std::time::Duration = std::time::Duration::from_millis(1500);
+
+/// Asks for a save shortly after leaving a shop, so purchases can't be undone by restarting
+/// without saving (also stops save scumming purchases)
+pub(crate) fn request_forced_save(why: &'static str) {
+    if let Ok(mut at) = FORCED_SAVE_AT.lock() {
+        *at = Some((std::time::Instant::now() + FORCED_SAVE_DELAY, why));
+    }
+}
+
+/// Called every frame from the main loop: does a requested save once it's due
+pub(crate) fn tick_forced_save() {
+    let why = {
+        let Ok(mut at) = FORCED_SAVE_AT.try_lock() else {
+            return;
+        };
+        match *at {
+            Some((when, why)) if std::time::Instant::now() >= when => {
+                *at = None;
+                why
+            }
+            _ => return,
+        }
+    };
+    let slot = CURRENT_SLOT.load(Ordering::SeqCst);
+    if slot < 0 {
+        log::warn!("Forced save skipped ({}): no save slot loaded yet", why);
+        return;
+    }
+    if !CONNECTED.load(Ordering::SeqCst) {
+        log::warn!("Forced save skipped ({}): not connected", why);
+        return;
+    }
+    log::info!("Forced save to slot {} ({})", slot, why);
+    // The same two steps the game does when you save at a statue
+    save_to_slot(*DMC3_ADDRESS + SAVE_SLOT_DATA, slot);
+    save_ap_save_file(0);
+}
 
 pub fn get_save_path() -> Result<String, Box<dyn Error>> {
     if let Ok(core) = AP_CORE.get().unwrap().as_ref().lock()
@@ -170,6 +217,7 @@ fn load_slot(param_1: usize, save_index: i32) {
         }
     }
     log::debug!("Loading from slot: {}", save_index);
+    CURRENT_SLOT.store(save_index, Ordering::SeqCst);
     match AP_CORE.get().unwrap().lock() {
         Ok(mut core) => {
             let client = core.connection.client_mut().unwrap();
@@ -222,6 +270,7 @@ fn save_to_slot(param_1: usize, save_index: i32) {
         crate::skill_manager::describe_skill_lists()
     );
     log::debug!("Saving to slot {}", save_index);
+    CURRENT_SLOT.store(save_index, Ordering::SeqCst);
     match AP_CORE.get().unwrap().lock() {
         Ok(core) => {
             let client = core.connection.client().unwrap();

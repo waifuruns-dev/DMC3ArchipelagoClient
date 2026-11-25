@@ -838,6 +838,12 @@ fn shop_copy_addrs() -> Option<(usize, usize)> {
     if looks_right(copy) && looks_right(result) {
         Some((copy, result))
     } else {
+        log::debug!(
+            "Skill shop list check: pointer {:#X}, list {:X?}, result {:X?}",
+            base,
+            read_copy(copy),
+            read_copy(result)
+        );
         None
     }
 }

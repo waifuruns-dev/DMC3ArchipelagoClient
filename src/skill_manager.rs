@@ -551,17 +551,28 @@ pub(crate) fn add_skill(id: usize, data: &mut ArchipelagoData) {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Skill shop checks: while the shop is open, Dante's skill flags show which purchase checks are
-// done (not which skills were received), so every unbought check is for sale. Buying one sets
-// its flag; the new flag is turned into a "Purchase <skill>" check. Received skills come back
-// when the shop closes.
+// Skill shop checks, done the way AshIndigo's gun shop works:
+// - opening: back up the shop's own skill list, then show the finished purchase checks in it
+// - buying: any skill that appears in the list is a purchase; send its check straight away
+// - leaving: put the backed-up list back before the game closes the shop, so the game copies the
+//   real skills (not purchases) into Dante's lists
+// Dante's own skills always come from received items (enforce_skills).
 
 /// True while the skill shop is open with purchase checks on
 pub(crate) static IN_SKILL_SHOP: AtomicBool = AtomicBool::new(false);
-/// What the shop's copy was set to when it opened (finished purchase checks), if it was found
-static SHOP_OPEN_FLAGS: RwLock<Option<[u32; 8]>> = RwLock::new(None);
-/// Skill flags at the last check, to spot newly bought skills
-static SHOP_SNAPSHOT: RwLock<Option<[u32; 8]>> = RwLock::new(None);
+
+/// The open shop: where its lists are, the backed-up real list, and what it shows now
+struct OpenShop {
+    list: usize,
+    result: usize,
+    backup: [u32; 8],
+    shown: [u32; 8],
+}
+static OPEN_SHOP: RwLock<Option<OpenShop>> = RwLock::new(None);
+
+/// Purchases already sent this session (so one purchase is never sent twice)
+static REPORTED_PURCHASES: LazyLock<RwLock<std::collections::HashSet<&'static str>>> =
+    LazyLock::new(|| RwLock::new(std::collections::HashSet::new()));
 
 /// Skill flags for the purchase checks already done
 pub(crate) fn purchase_check_expertise<'a>(checked: impl Iterator<Item = &'a str>) -> [u32; 8] {
@@ -585,305 +596,82 @@ fn newly_bought(old: &[u32; 8], new: &[u32; 8]) -> Vec<&'static str> {
         .collect()
 }
 
-/// Shows purchase checks in the shop. Call before the shop builds its menu.
-pub(crate) fn open_skill_shop(flags: [u32; 8]) {
+/// Shop opens: back up its list and show the finished purchase checks instead
+pub(crate) fn open_skill_shop(checks: [u32; 8]) {
     IN_SKILL_SHOP.store(true, Ordering::SeqCst);
-    // Show finished purchase checks in the shop's own copy (only this list; received skills
-    // stay buyable for their checks)
-    let shown = match shop_copy_addrs() {
-        Some((copy, _)) => {
-            write_list(copy, flags);
-            Some(flags)
-        }
-        None => {
-            log::warn!("Skill shop: couldn't find the shop's skill list; bought checks won't show");
-            None
-        }
-    };
-    if let Ok(mut open) = SHOP_OPEN_FLAGS.write() {
-        *open = shown;
+    let opened = find_shop_lists().and_then(|(list, result)| {
+        let backup = read_copy(list)?;
+        write_list(list, checks);
+        Some(OpenShop { list, result, backup, shown: checks })
+    });
+    match &opened {
+        Some(shop) => log::debug!(
+            "Skill shop opened: list at {:#X}, backed up {:X?}, showing purchase checks {:X?}",
+            shop.list,
+            shop.backup,
+            checks
+        ),
+        None => log::warn!(
+            "Skill shop: couldn't find the shop's skill list; purchases won't be checks"
+        ),
     }
-    if let Ok(mut snap) = SHOP_SNAPSHOT.write() {
-        *snap = Some(flags);
+    if let Ok(mut open) = OPEN_SHOP.write() {
+        *open = opened;
     }
-    log::debug!("Skill shop opened, showing purchase checks: {:X?}", flags);
 }
 
-/// Returns skills bought since the last call (from either the session or live copy)
-pub(crate) fn take_bought_skills() -> Vec<&'static str> {
-    let Ok(mut snap) = SHOP_SNAPSHOT.write() else {
+/// Skills bought since the last call: new flags in the shop's list
+pub(crate) fn take_new_purchases() -> Vec<&'static str> {
+    let Ok(mut open) = OPEN_SHOP.write() else {
         return vec![];
     };
-    let Some(old) = *snap else {
+    let Some(shop) = open.as_mut() else {
         return vec![];
     };
-    // Only the mission list the shop uses: Dante's saved and live lists hold received skills,
-    // which aren't purchases
-    let Some(current) = mission_expertise() else {
+    let Some(now) = read_copy(shop.list) else {
         return vec![];
     };
-    let received = EXPECTED_EXPERTISE
-        .read()
-        .ok()
-        .and_then(|e| *e)
-        .unwrap_or(DEFAULT_SKILLS);
-    let mut bought: Vec<&'static str> = newly_bought(&old, &current)
-        .into_iter()
-        .filter(|name| {
-            let d = SKILLS_MAP.get(name).unwrap();
-            received[d.index] & d.flag == 0
-        })
-        .collect();
+    if now == shop.shown {
+        return vec![];
+    }
+    let mut bought = newly_bought(&shop.shown, &now);
+    for (index, word) in now.iter().enumerate() {
+        let unknown = word & !shop.shown[index] & !purchase_bits(index);
+        if unknown != 0 {
+            log::warn!("Skill shop: bought a skill with unknown flag {:#X} in word {}", unknown, index);
+        }
+    }
+    shop.shown = now;
     if let Ok(mut reported) = REPORTED_PURCHASES.write() {
         bought.retain(|name| !reported.contains(name));
         reported.extend(bought.iter().copied());
     }
     if !bought.is_empty() {
         log::debug!("Skill shop: bought {:?}", bought);
-        *snap = Some(current);
     }
     bought
 }
 
-/// Leaves the shop: stop showing purchase checks and put received skills back
-pub(crate) fn close_skill_shop(data: &ArchipelagoData) {
-    start_purchase_watch();
+/// Every purchase flag in one word of the list (for the unknown flag warning)
+fn purchase_bits(index: usize) -> u32 {
+    SKILLS_MAP.values().filter(|d| d.index == index).fold(0, |acc, d| acc | d.flag)
+}
 
-    if let Ok(mut snap) = SHOP_SNAPSHOT.write() {
-        *snap = None;
+/// Shop closes: put the backed-up list back (call before the game closes the shop), then keep
+/// Dante's received skills
+pub(crate) fn close_skill_shop(data: &ArchipelagoData) {
+    if let Ok(mut open) = OPEN_SHOP.write()
+        && let Some(shop) = open.take()
+    {
+        write_list(shop.list, shop.backup);
+        if read_copy(shop.result).is_some_and(looks_like_skill_list) {
+            write_list(shop.result, shop.backup);
+        }
+        log::debug!("Skill shop closed: list put back to {:X?}", shop.backup);
     }
     IN_SKILL_SHOP.store(false, Ordering::SeqCst);
     set_skills(data);
-    log::debug!("Skill shop closed, received skills re-applied");
 }
-
-/// Test build: looks for skill lists (8 words whose 5th and 6th match the defaults, which never
-/// change) on the skill shop object and around the old global pointer, and logs where they are
-pub(crate) fn log_skill_list_scan(when: &str, shop: usize) {
-    let mut found = Vec::new();
-    let mut scan = |label: &str, start: usize, len: usize| {
-        let mut buf = vec![0u8; len + 32];
-        if start == 0 || !safe_read(start, &mut buf) {
-            if !label.contains("->") {
-                found.push(format!("{} {:#X}: unreadable", label, start));
-            }
-            return;
-        }
-        let word = |i: usize| u32::from_le_bytes(buf[i..i + 4].try_into().unwrap());
-        let mut hits = 0;
-        let mut off = 0;
-        while off + 32 <= buf.len() && hits < 16 {
-            if word(off + 16) == DEFAULT_SKILLS[4] && word(off + 20) == DEFAULT_SKILLS[5] {
-                let words: Vec<u32> = (0..8).map(|k| word(off + k * 4)).collect();
-                found.push(format!("{}+{:#X} {:X?}", label, off, words));
-                hits += 1;
-                off += 32;
-            } else {
-                off += 4;
-            }
-        }
-    };
-    scan("shop", shop, 0x8000);
-    // One step further: every pointer on the shop's data
-    let mut obj = vec![0u8; 0x1000];
-    if safe_read(shop, &mut obj) {
-        let mut seen = Vec::new();
-        for off in (0..obj.len()).step_by(8) {
-            let p = u64::from_le_bytes(obj[off..off + 8].try_into().unwrap()) as usize;
-            if p < 0x10000 || p > 0x7FFF_FFFF_FFFF || p % 4 != 0 || seen.contains(&p) {
-                continue;
-            }
-            seen.push(p);
-            scan(&format!("shop+{:#X}->{:#X}", off, p), p, 0x2000);
-        }
-    }
-    let mut ptr = [0u8; 8];
-    if safe_read(*crate::DMC3_ADDRESS + SHOP_COPY_POINTER, &mut ptr) {
-        scan("global", u64::from_le_bytes(ptr) as usize, 0x2000);
-    }
-    log::debug!("Skill list scan ({}): {}", when, found.join(" | "));
-}
-
-/// Test build: searches all readable game memory for skill lists (5th-8th words match the
-/// defaults, which purchases never touch). Read-only and crash-safe; slow, so only on shop open
-/// and close.
-pub(crate) fn log_full_skill_list_scan(when: &str) {
-    use windows::Win32::System::Memory::{
-        MEM_COMMIT, MEMORY_BASIC_INFORMATION, PAGE_GUARD, PAGE_NOACCESS, VirtualQuery,
-    };
-    let started = std::time::Instant::now();
-    let mut hits = Vec::new();
-    let mut addr = 0x10000usize;
-    let mut buf = Vec::new();
-    while addr < 0x7FFF_FFFF_0000 && hits.len() < 40 {
-        let mut info = MEMORY_BASIC_INFORMATION::default();
-        if unsafe {
-            VirtualQuery(
-                Some(addr as *const _),
-                &mut info,
-                std::mem::size_of::<MEMORY_BASIC_INFORMATION>(),
-            )
-        } == 0
-        {
-            break;
-        }
-        let base = info.BaseAddress as usize;
-        let size = info.RegionSize;
-        let readable = info.State == MEM_COMMIT
-            && (info.Protect.0 & (PAGE_NOACCESS.0 | PAGE_GUARD.0)) == 0
-            && size <= 0x4000_0000;
-        if readable {
-            buf.resize(size, 0);
-            if safe_read(base, &mut buf) {
-                let mut off = 0;
-                while off + 32 <= size {
-                    let w = |k: usize| u32::from_le_bytes(buf[off + k * 4..off + k * 4 + 4].try_into().unwrap());
-                    if w(4) == DEFAULT_SKILLS[4]
-                        && w(5) == DEFAULT_SKILLS[5]
-                        && w(6) == DEFAULT_SKILLS[6]
-                        && w(7) == DEFAULT_SKILLS[7]
-                    {
-                        let words: Vec<u32> = (0..8).map(w).collect();
-                        hits.push(format!("{:#X} {:X?}", base + off, words));
-                        off += 32;
-                        continue;
-                    }
-                    off += 4;
-                }
-            }
-        }
-        addr = base + size.max(0x1000);
-    }
-    log::debug!(
-        "Full skill list scan ({}, {} ms): {}",
-        when,
-        started.elapsed().as_millis(),
-        hits.join(" | ")
-    );
-}
-
-/// Research logging: the session, "next start" and "right now" skill lists
-pub(crate) fn describe_skill_lists() -> String {
-    let session = SessionData::with_read(|s| s.expertise).ok();
-    let queued = crate::data::game_structs::QueuedMissionActorData::with_read(|q| q.expertise).ok();
-    format!(
-        "session {:X?}, next start {:X?}, right now {:X?}",
-        session,
-        queued,
-        mission_expertise()
-    )
-}
-
-/// Skill flags in the mission's active copy (where the shop seems to write purchases), if available
-fn mission_expertise() -> Option<[u32; 8]> {
-    crate::data::game_structs::ActiveMissionActorData::with_read(|a| a.expertise).ok()
-}
-
-/// After the shop closes the game writes bought skills into the mission copy about a second
-/// later. (flags at shop close, when to stop watching)
-/// Purchases already turned into checks this session
-static REPORTED_PURCHASES: LazyLock<RwLock<std::collections::HashSet<&'static str>>> =
-    LazyLock::new(|| RwLock::new(std::collections::HashSet::new()));
-static PENDING_PURCHASES: RwLock<Option<([u32; 8], std::time::Instant)>> = RwLock::new(None);
-const PURCHASE_WATCH: std::time::Duration = std::time::Duration::from_secs(3);
-
-/// Puts the mission's "right now" and "next start" skill lists back to the received skills
-fn restore_mission_skills(why: &str) {
-    if IN_SKILL_SHOP.load(Ordering::SeqCst) {
-        return;
-    }
-    let Some(received) = EXPECTED_EXPERTISE.read().ok().and_then(|e| *e) else {
-        return;
-    };
-    let _ = crate::data::game_structs::ActiveMissionActorData::with_mut(|a| a.expertise = received);
-    let _ = crate::data::game_structs::QueuedMissionActorData::with_mut(|q| q.expertise = received);
-    if let Some((copy, result)) = shop_copy_addrs() {
-        write_list(copy, received);
-        write_list(result, received);
-    }
-    log::debug!("Skill shop: mission skill lists restored to received skills ({})", why);
-}
-
-fn start_purchase_watch() {
-    let start = mission_expertise().unwrap_or(DEFAULT_SKILLS);
-    if let Ok(mut pending) = PENDING_PURCHASES.write() {
-        *pending = Some((start, std::time::Instant::now() + PURCHASE_WATCH));
-    }
-}
-
-/// Called every frame: skills newly written into the mission copy after the shop closed, not
-/// counting skills that were received as items
-pub(crate) fn poll_bought_skills() -> Vec<&'static str> {
-    let Ok(mut pending) = PENDING_PURCHASES.try_write() else {
-        return vec![];
-    };
-    let Some((prev, until)) = *pending else {
-        return vec![];
-    };
-    if std::time::Instant::now() > until {
-        *pending = None;
-        restore_mission_skills("watch ended");
-        return vec![];
-    }
-    let Some(now) = mission_expertise() else {
-        return vec![];
-    };
-    let received = EXPECTED_EXPERTISE
-        .read()
-        .ok()
-        .and_then(|e| *e)
-        .unwrap_or(DEFAULT_SKILLS);
-    // The game writes "what the shop's copy held + skills bought this visit". If the copy was
-    // set to purchase checks, anything new on top of it is a purchase (even a skill received as
-    // an item), and a write that doesn't keep it (e.g. a mission restart) isn't from the shop.
-    // Otherwise anything beyond received skills is a purchase.
-    let shown = SHOP_OPEN_FLAGS.read().ok().and_then(|f| *f);
-    let base = shown.unwrap_or(received);
-    let from_shop = shown.is_none_or(|s| (0..8).all(|i| now[i] & s[i] == s[i]));
-    let Ok(mut reported) = REPORTED_PURCHASES.write() else {
-        return vec![];
-    };
-    let bought: Vec<&'static str> = SKILLS_MAP
-        .iter()
-        .filter(|(name, d)| {
-            from_shop
-                && now[d.index] & d.flag != 0
-                && base[d.index] & d.flag == 0
-                && !reported.contains(*name)
-        })
-        .map(|(name, _)| *name)
-        .collect();
-    if from_shop && now != prev {
-        // Flags the game added that no shop skill uses: the skill table has a wrong value
-        for i in 0..8 {
-            let mut added = now[i] & !base[i];
-            for d in SKILLS_MAP.values() {
-                if d.index == i {
-                    added &= !d.flag;
-                }
-            }
-            if added != 0 {
-                log::warn!("Skill shop: bought a skill with unknown flag {:#X} in word {}", added, i);
-            }
-        }
-    }
-    reported.extend(bought.iter().copied());
-    drop(reported);
-    if now != prev {
-        // The game has written the purchase: put both mission lists straight back to the
-        // skills actually received
-        *pending = None;
-        restore_mission_skills("purchase read");
-    }
-    if !bought.is_empty() {
-        log::debug!("Skill shop: bought {:?} (written after the shop closed)", bought);
-    }
-    bought
-}
-
-// ---------------------------------------------------------------------------------------------
-// Reading the shop's own copy of the skill list
-
 
 /// Reads game memory without risking a crash: an unreadable or freed address returns None
 fn safe_read(addr: usize, buf: &mut [u8]) -> bool {
@@ -916,41 +704,48 @@ fn read_copy(addr: usize) -> Option<[u32; 8]> {
 }
 
 
-// The skill shop's own copy of the skills. The game copies the saved skills into it when the
-// Divinity Statue menu opens, the shop shows bought/unbought from it, and purchases are added to
-// it. Found through a pointer in the game's data (same in two launches, confirmed in logs).
-const SHOP_COPY_POINTER: usize = 0xC9DDB8;
-/// The list the shop shows and adds purchases to
-const SHOP_COPY_OFFSET: usize = 0x9E4;
-/// Where the game puts the result when the shop closes
-const SHOP_RESULT_OFFSET: usize = 0xAB4;
+// The skill shop's own lists. The game copies the saved skills into the shop's list when the
+// Divinity Statue menu opens; the shop shows bought/unbought from it and adds purchases to it. A
+// second list sits 0xD0 after it. Both are on an object found through a pointer in the game's
+// data, but their position on it moves (+0x9E4 in one session, +0x21E4 in another), so they're
+// found by searching the object for two skill lists 0xD0 apart.
+const SHOP_OBJECT_POINTER: usize = 0xC9DDB8;
+const SHOP_SEARCH_SIZE: usize = 0x4000;
+const SHOP_RESULT_DISTANCE: usize = 0xD0;
 
-/// Addresses of the shop's copy and result lists, only if they look like skill lists
-fn shop_copy_addrs() -> Option<(usize, usize)> {
+/// The last four words of a skill list never change (no purchasable skills in them)
+fn looks_like_skill_list(w: [u32; 8]) -> bool {
+    w[4..] == DEFAULT_SKILLS[4..]
+}
+
+/// Addresses of the shop's list and the list 0xD0 after it
+fn find_shop_lists() -> Option<(usize, usize)> {
     let mut ptr = [0u8; 8];
-    if !safe_read(*crate::DMC3_ADDRESS + SHOP_COPY_POINTER, &mut ptr) {
+    if !safe_read(*crate::DMC3_ADDRESS + SHOP_OBJECT_POINTER, &mut ptr) {
         return None;
     }
     let base = u64::from_le_bytes(ptr) as usize;
     if base == 0 {
         return None;
     }
-    let looks_right = |a: usize| {
-        read_copy(a).is_some_and(|w| w[4] == DEFAULT_SKILLS[4] && w[5] == DEFAULT_SKILLS[5])
-    };
-    let copy = base + SHOP_COPY_OFFSET;
-    let result = base + SHOP_RESULT_OFFSET;
-    if looks_right(copy) && looks_right(result) {
-        Some((copy, result))
-    } else {
-        log::debug!(
-            "Skill shop list check: pointer {:#X}, list {:X?}, result {:X?}",
-            base,
-            read_copy(copy),
-            read_copy(result)
-        );
-        None
+    let mut buf = vec![0u8; SHOP_SEARCH_SIZE + SHOP_RESULT_DISTANCE + 32];
+    if !safe_read(base, &mut buf) {
+        return None;
     }
+    let words = |at: usize| -> [u32; 8] {
+        let mut w = [0u32; 8];
+        for (k, v) in w.iter_mut().enumerate() {
+            *v = u32::from_le_bytes(buf[at + k * 4..at + k * 4 + 4].try_into().unwrap());
+        }
+        w
+    };
+    (0..SHOP_SEARCH_SIZE)
+        .step_by(4)
+        .find(|&off| {
+            looks_like_skill_list(words(off))
+                && looks_like_skill_list(words(off + SHOP_RESULT_DISTANCE))
+        })
+        .map(|off| (base + off, base + off + SHOP_RESULT_DISTANCE))
 }
 
 fn write_list(addr: usize, flags: [u32; 8]) {

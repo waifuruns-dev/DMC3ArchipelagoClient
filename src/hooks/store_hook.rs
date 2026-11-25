@@ -132,8 +132,6 @@ pub fn skill_shop_constructor(custom_skill: usize) {
             orig(custom_skill);
         }
     }
-    skill_manager::log_skill_list_scan("shop opened", custom_skill);
-    skill_manager::log_full_skill_list_scan("shop opened");
     if let Some(mapping) = MAPPING.read().unwrap().as_ref()
         && mapping.randomize_skills
         && !mapping.shop_skill_checks
@@ -142,17 +140,9 @@ pub fn skill_shop_constructor(custom_skill: usize) {
     }
 }
 
-/// Called every frame: sends checks for skills the game writes in after the shop closes
-pub(crate) fn poll_skill_purchases() {
-    let bought = skill_manager::poll_bought_skills();
-    if !bought.is_empty() {
-        send_skill_checks(bought);
-    }
-}
-
-/// Sends a "Purchase <skill>" check for each skill bought in the shop
+/// Sends a "Purchase <skill>" check for each skill bought in the shop since the last call
 fn send_bought_skills() {
-    let bought = skill_manager::take_bought_skills();
+    let bought = skill_manager::take_new_purchases();
     if !bought.is_empty() {
         send_skill_checks(bought);
     }
@@ -192,23 +182,16 @@ pub static ORIGINAL_SKILL_SHOP_DECONSTRUCTOR: OnceLock<unsafe extern "C" fn(cust
 
 pub fn skill_shop_deconstructor(custom_skill: usize) {
     log::info!("Skill shop deconstructor ({:#X})", custom_skill);
-    skill_manager::log_skill_list_scan("shop closing", custom_skill);
-    skill_manager::log_full_skill_list_scan("shop closing");
     if skill_manager::IN_SKILL_SHOP.load(Ordering::SeqCst) {
+        // Last purchases, then put the shop's real list back before the game closes the shop
         send_bought_skills();
+        skill_manager::close_skill_shop(&ARCHIPELAGO_DATA.read().unwrap());
     }
+    CANT_PURCHASE.store(false, Ordering::SeqCst);
     if let Some(orig) = ORIGINAL_SKILL_SHOP_DECONSTRUCTOR.get() {
         unsafe {
             orig(custom_skill);
         }
-    }
-    // The shop may only write bought skills into the session when it closes
-    if skill_manager::IN_SKILL_SHOP.load(Ordering::SeqCst) {
-        send_bought_skills();
-    }
-    CANT_PURCHASE.store(false, Ordering::SeqCst);
-    if skill_manager::IN_SKILL_SHOP.load(Ordering::SeqCst) {
-        skill_manager::close_skill_shop(&ARCHIPELAGO_DATA.read().unwrap());
     }
 }
 
@@ -227,7 +210,6 @@ pub fn skill_shop_purchase(custom_skill: usize) {
                 mode,
                 skill_manager::IN_SKILL_SHOP.load(Ordering::SeqCst)
             );
-            skill_manager::log_skill_list_scan(&format!("mode {:#X}", mode), custom_skill);
         }
         if skill_manager::IN_SKILL_SHOP.load(Ordering::SeqCst) {
             // Purchase checks: let the game sell the skill, then send its check

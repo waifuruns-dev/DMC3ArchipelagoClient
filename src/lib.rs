@@ -112,7 +112,6 @@ fn main_loop_hook() {
     game_manager::tick_pending_kill();
     // Keep received skills applied after the game resets them (death, room change)
     skill_manager::enforce_skills();
-    hooks::store_hook::poll_skill_purchases();
 
     if !config::CONFIG.connections.disable_auto_connect
         && let Ok(mut core) = AP_CORE
